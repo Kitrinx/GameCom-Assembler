@@ -46,11 +46,24 @@ struct symbols {
 	size_t cap;
 };
 
+struct obj_fixup {
+	uint16_t address;
+	char *name;
+};
+
+struct obj_fixups {
+	struct obj_fixup *items;
+	size_t size;
+	size_t cap;
+};
+
 struct assembler {
 	struct lines lines;
 	struct symbols symbols;
+	struct obj_fixups fixups;
 	const char *root_path;
 	int case_sensitive;
+	int object_mode;
 	int resolve_pass;
 	char error[512];
 };
@@ -307,6 +320,34 @@ static int symbol_get(struct assembler *as, const char *name, int *value)
 	}
 	free(key);
 	return 0;
+}
+
+static void fixups_clear(struct obj_fixups *fixups)
+{
+	size_t i;
+	for (i = 0; i < fixups->size; i++)
+		free(fixups->items[i].name);
+	fixups->size = 0;
+}
+
+static void fixups_free(struct obj_fixups *fixups)
+{
+	fixups_clear(fixups);
+	free(fixups->items);
+	fixups->items = NULL;
+	fixups->cap = 0;
+}
+
+static void fixup_add(struct assembler *as, uint16_t address, const char *name)
+{
+	struct obj_fixup *fixup;
+	if (as->fixups.size == as->fixups.cap) {
+		as->fixups.cap = as->fixups.cap ? as->fixups.cap * 2 : 32;
+		as->fixups.items = xrealloc(as->fixups.items, as->fixups.cap * sizeof(as->fixups.items[0]));
+	}
+	fixup = &as->fixups.items[as->fixups.size++];
+	fixup->address = address;
+	fixup->name = canon_name(as, name);
 }
 
 static void init_symbols(struct assembler *as)
@@ -984,6 +1025,25 @@ static int eval_expr(struct assembler *as, const char *text, int pc, int *ok)
 		*ok = ex.ok;
 	free(sized);
 	return value;
+}
+
+static char *unresolved_simple_symbol(struct assembler *as, const char *text)
+{
+	char *sized = strip_operand_size_hint_copy(text);
+	char *body = sized;
+	int value;
+	while (isspace((unsigned char)*body))
+		body++;
+	if (*body == '#')
+		body++;
+	trim_owned(body);
+	if (!is_symbol_name(body) || symbol_get(as, body, &value)) {
+		free(sized);
+		return NULL;
+	}
+	body = canon_name(as, body);
+	free(sized);
+	return body;
 }
 
 static int u8(struct assembler *as, int value, const char *what)
@@ -1750,6 +1810,17 @@ static int encode_jmp_call(struct assembler *as, struct bytes *out, int indirect
 			free(body);
 			return 1;
 		}
+		if (as->object_mode) {
+			char *external = unresolved_simple_symbol(as, ops[0]);
+			if (external) {
+				bytes_emit(out, is_call ? 0x49 : 0x98);
+				if (as->resolve_pass)
+					fixup_add(as, (uint16_t)(pc + 1), external);
+				bytes_emit_word(out, 0);
+				free(external);
+				return 1;
+			}
+		}
 		value = u16(as, eval_expr(as, ops[0], pc, &ok), ops[0]);
 		bytes_emit(out, is_call ? 0x49 : 0x98);
 		bytes_emit_word(out, value);
@@ -1759,6 +1830,16 @@ static int encode_jmp_call(struct assembler *as, struct bytes *out, int indirect
 		int value;
 		int ok = 0;
 		bytes_emit(out, 0x90 | cond_code(as, ops[0]));
+		if (as->object_mode) {
+			char *external = unresolved_simple_symbol(as, ops[1]);
+			if (external) {
+				if (as->resolve_pass)
+					fixup_add(as, (uint16_t)(pc + 1), external);
+				bytes_emit_word(out, 0);
+				free(external);
+				return 1;
+			}
+		}
 		value = u16(as, eval_expr(as, ops[1], pc, &ok), ops[1]);
 		bytes_emit_word(out, value);
 		return 1;
@@ -1980,6 +2061,12 @@ static int directive_is_data_dm(struct line *line)
 	return 0;
 }
 
+static int line_is_equ_directive(struct line *line)
+{
+	return line->op && (str_eq_lit(line->op, "equ") || str_eq_lit(line->op, ".equ") ||
+		str_eq_lit(line->op, "set") || str_eq_lit(line->op, ".set"));
+}
+
 static void encode_directive(struct assembler *as, struct line *line, struct bytes *out, int pc)
 {
 	const char *op = line->op;
@@ -2003,6 +2090,16 @@ static void encode_directive(struct assembler *as, struct line *line, struct byt
 	if (str_eq_lit(op, "dw") || str_eq_lit(op, "defw") || str_eq_lit(op, ".word") || str_eq_lit(op, "word")) {
 		for (i = 0; i < line->operand_count; i++) {
 			int ok = 0;
+			if (as->object_mode) {
+				char *external = unresolved_simple_symbol(as, line->operands[i]);
+				if (external) {
+					if (as->resolve_pass)
+						fixup_add(as, (uint16_t)(pc + out->size), external);
+					bytes_emit_word(out, 0);
+					free(external);
+					continue;
+				}
+			}
 			bytes_emit_word(out, u16(as, eval_expr(as, line->operands[i], pc, &ok), line->operands[i]));
 		}
 		return;
@@ -2097,7 +2194,7 @@ static void assembler_pass(struct assembler *as, int resolve)
 		struct line *line = &as->lines.items[i];
 		struct bytes tmp = { 0 };
 		uint16_t pc = section_code ? code_pc : data_pc;
-		int line_is_equ = line->op && (str_eq_lit(line->op, "equ") || str_eq_lit(line->op, ".equ") || str_eq_lit(line->op, "set") || str_eq_lit(line->op, ".set"));
+		int line_is_equ = line_is_equ_directive(line);
 		line->address = pc;
 		line->span = 0;
 		bytes_clear(&line->out);
@@ -2183,9 +2280,11 @@ static int assemble(struct assembler *as, const char *source, const char *base_e
 		if (as->error[0])
 			return 0;
 	}
+	fixups_clear(&as->fixups);
 	assembler_pass(as, 1);
 	if (as->error[0])
 		return 0;
+	fixups_clear(&as->fixups);
 	assembler_pass(as, 1);
 	if (as->error[0])
 		return 0;
@@ -2226,6 +2325,162 @@ static int assemble(struct assembler *as, const char *source, const char *base_e
 	return 1;
 }
 
+struct obj_export {
+	char *name;
+	uint16_t value;
+};
+
+struct obj_exports {
+	struct obj_export *items;
+	size_t size;
+	size_t cap;
+};
+
+static void write_u16_le(FILE *fp, unsigned value)
+{
+	fputc(value & 0xff, fp);
+	fputc((value >> 8) & 0xff, fp);
+}
+
+static void write_u32_le(FILE *fp, uint32_t value)
+{
+	fputc(value & 0xff, fp);
+	fputc((value >> 8) & 0xff, fp);
+	fputc((value >> 16) & 0xff, fp);
+	fputc((value >> 24) & 0xff, fp);
+}
+
+static int export_index(struct obj_exports *exports, const char *name)
+{
+	size_t i;
+	for (i = 0; i < exports->size; i++) {
+		if (strcmp(exports->items[i].name, name) == 0)
+			return (int)i;
+	}
+	return -1;
+}
+
+static void export_add(struct assembler *as, struct obj_exports *exports, const char *name, uint16_t value)
+{
+	char *key = canon_name(as, name);
+	if (export_index(exports, key) >= 0) {
+		free(key);
+		return;
+	}
+	if (exports->size == exports->cap) {
+		exports->cap = exports->cap ? exports->cap * 2 : 64;
+		exports->items = xrealloc(exports->items, exports->cap * sizeof(exports->items[0]));
+	}
+	exports->items[exports->size].name = key;
+	exports->items[exports->size].value = value;
+	exports->size++;
+}
+
+static void exports_free(struct obj_exports *exports)
+{
+	size_t i;
+	for (i = 0; i < exports->size; i++)
+		free(exports->items[i].name);
+	free(exports->items);
+	exports->items = NULL;
+	exports->size = 0;
+	exports->cap = 0;
+}
+
+static void collect_object_exports(struct assembler *as, struct obj_exports *exports)
+{
+	size_t i;
+	int saw_global = 0;
+	for (i = 0; i < as->lines.size; i++) {
+		struct line *line = &as->lines.items[i];
+		int j;
+		if (!line->op || !(str_eq_lit(line->op, "global") || str_eq_lit(line->op, "public")))
+			continue;
+		saw_global = 1;
+		for (j = 0; j < line->operand_count; j++) {
+			int value;
+			if (symbol_get(as, line->operands[j], &value))
+				export_add(as, exports, line->operands[j], (uint16_t)value);
+			else
+				set_errorf(as, "global symbol is undefined: %s", line->operands[j]);
+		}
+	}
+	if (saw_global)
+		return;
+	for (i = 0; i < as->lines.size; i++) {
+		struct line *line = &as->lines.items[i];
+		int value;
+		if (line->label && !line_is_equ_directive(line) && symbol_get(as, line->label, &value))
+			export_add(as, exports, line->label, (uint16_t)value);
+	}
+}
+
+static void write_object_file(struct assembler *as, const char *path, const struct bytes *image, uint16_t base)
+{
+	struct obj_exports exports = { 0 };
+	FILE *fp;
+	size_t i;
+	if (image->size > 0xffffffffu) {
+		fprintf(stderr, "gamecom-as: error: object image is too large\n");
+		exit(1);
+	}
+	collect_object_exports(as, &exports);
+	if (as->error[0]) {
+		fprintf(stderr, "gamecom-as: error: %s\n", as->error);
+		exit(1);
+	}
+	if (exports.size > 0xffff || as->fixups.size > 0xffff) {
+		fprintf(stderr, "gamecom-as: error: too many object exports or fixups\n");
+		exit(1);
+	}
+	fp = fopen(path, "wb");
+	if (!fp) {
+		fprintf(stderr, "gamecom-as: error: cannot create %s: %s\n", path, strerror(errno));
+		exit(1);
+	}
+	fwrite("GCO1", 1, 4, fp);
+	write_u16_le(fp, base);
+	write_u32_le(fp, (uint32_t)image->size);
+	if (image->size && fwrite(image->data, 1, image->size, fp) != image->size) {
+		fprintf(stderr, "gamecom-as: error: cannot write %s: %s\n", path, strerror(errno));
+		exit(1);
+	}
+	write_u16_le(fp, (unsigned)exports.size);
+	for (i = 0; i < exports.size; i++) {
+		size_t len = strlen(exports.items[i].name);
+		if (len > 0xffff) {
+			fprintf(stderr, "gamecom-as: error: export name is too long\n");
+			exit(1);
+		}
+		write_u16_le(fp, (unsigned)len);
+		fwrite(exports.items[i].name, 1, len, fp);
+		write_u16_le(fp, exports.items[i].value);
+	}
+	write_u16_le(fp, (unsigned)as->fixups.size);
+	for (i = 0; i < as->fixups.size; i++) {
+		uint32_t offset = (uint16_t)(as->fixups.items[i].address - base);
+		size_t len = strlen(as->fixups.items[i].name);
+		if (offset + 1 >= image->size) {
+			fprintf(stderr, "gamecom-as: error: fixup for %s is outside the object image\n", as->fixups.items[i].name);
+			exit(1);
+		}
+		if (len > 0xffff) {
+			fprintf(stderr, "gamecom-as: error: fixup name is too long\n");
+			exit(1);
+		}
+		write_u32_le(fp, offset);
+		fputc(1, fp);
+		write_u16_le(fp, (unsigned)len);
+		fwrite(as->fixups.items[i].name, 1, len, fp);
+	}
+	if (ferror(fp)) {
+		fprintf(stderr, "gamecom-as: error: cannot write %s: %s\n", path, strerror(errno));
+		exit(1);
+	}
+	fclose(fp);
+	exports_free(&exports);
+}
+
 static void write_file(const char *path, const uint8_t *data, size_t size)
 {
 	FILE *fp = fopen(path, "wb");
@@ -2261,7 +2516,7 @@ static void write_listing(struct assembler *as, const char *path)
 
 static void usage(void)
 {
-	fprintf(stderr, "usage: gamecom-as SOURCE -o OUTPUT [--lst LISTING] [--base EXPR] [--define NAME=EXPR] [--case-sensitive]\n");
+	fprintf(stderr, "usage: gamecom-as SOURCE -o OUTPUT [--obj] [--lst LISTING] [--base EXPR] [--define NAME=EXPR] [--case-sensitive]\n");
 	exit(1);
 }
 
@@ -2289,6 +2544,8 @@ int main(int argc, char **argv)
 			if (++i >= argc)
 				usage();
 			base_expr = argv[i];
+		} else if (strcmp(argv[i], "--obj") == 0 || strcmp(argv[i], "--object") == 0) {
+			as.object_mode = 1;
 		} else if (strcmp(argv[i], "--case-sensitive") == 0) {
 			as.case_sensitive = 1;
 		} else if (strcmp(argv[i], "--define") == 0) {
@@ -2317,8 +2574,12 @@ int main(int argc, char **argv)
 		fprintf(stderr, "gamecom-as: error: %s\n", as.error[0] ? as.error : "assembly failed");
 		return 1;
 	}
-	write_file(output, image.data, image.size);
+	if (as.object_mode)
+		write_object_file(&as, output, &image, base);
+	else
+		write_file(output, image.data, image.size);
 	if (listing)
 		write_listing(&as, listing);
+	fixups_free(&as.fixups);
 	return 0;
 }
