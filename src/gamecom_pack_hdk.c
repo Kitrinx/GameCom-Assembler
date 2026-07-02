@@ -120,6 +120,7 @@ int main(int argc, char **argv)
 	const char *gfx_dir = NULL;
 	uint32_t image_size = 0;
 	uint32_t program_offset = DEFAULT_PROGRAM_OFFSET;
+	uint8_t fill = 0xff;
 	struct buffer asm_data;
 	struct buffer hdk_data = { NULL, 0 };
 	size_t overlay_len;
@@ -147,6 +148,10 @@ int main(int argc, char **argv)
 			if (++i >= argc)
 				fail("missing program offset");
 			program_offset = (uint32_t)parse_number(argv[i], 0xffffffffu, "bad program offset");
+		} else if (strcmp(argv[i], "--fill") == 0) {
+			if (++i >= argc)
+				fail("missing fill byte");
+			fill = (uint8_t)parse_number(argv[i], 0xffu, "bad fill byte");
 		} else if (!input) {
 			input = argv[i];
 		} else {
@@ -154,7 +159,7 @@ int main(int argc, char **argv)
 		}
 	}
 	if (!input || !output)
-		fail("usage: gamecom-pack-hdk INPUT -o OUTPUT [--hdk-data PATH] [--gfx-dir DIR]");
+		fail("usage: gamecom-pack-hdk INPUT -o OUTPUT [--hdk-data PATH] [--gfx-dir DIR] [--fill BYTE]");
 	asm_data = read_file(input);
 	if (hdk_data_path)
 		hdk_data = read_file(hdk_data_path);
@@ -163,9 +168,10 @@ int main(int argc, char **argv)
 		image_size = (program_offset + overlay_len < 0x100000u) ? 0x100000u : 0x200000u;
 	if (!image_size || program_offset >= image_size || program_offset + overlay_len > image_size)
 		fail("program and HDK filler do not fit output image");
-	image = calloc(image_size, 1);
+	image = malloc(image_size);
 	if (!image)
 		fail("out of memory");
+	memset(image, fill, image_size);
 	for (i = 0; (size_t)i < overlay_len; i++)
 		image[program_offset + (uint32_t)i] = ((size_t)i < asm_data.size) ? asm_data.data[i] : hdk_data.data[i];
 	if (gfx_dir) {

@@ -1,0 +1,6 @@
+.DS_Store
+build/
+examples/*/build/
+examples/*/*/build/
+*.o
+*.dSYM/

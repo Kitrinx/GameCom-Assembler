@@ -16,5 +16,8 @@ ResNop		equ 0082h
 	mov [rr2]+,r0
 	mov r0,[rr2]+
 	bset #34h[r2],#3
+	mov r10,#34h
+	mov r11,r10
+	movw rr10,#1234h
 
 	end

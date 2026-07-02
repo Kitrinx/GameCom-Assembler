@@ -9,7 +9,8 @@ ROMTOOL := $(BUILD_DIR)/gamecom-romtool
 EXAMPLE_DIRS := \
 	examples/hello_world \
 	examples/sound_tests_asm \
-	examples/cycle_count_test
+	examples/cycle_count_test \
+	examples/tetris
 
 .PHONY: all tools bins test coverage examples verify-examples clean clean-examples
 

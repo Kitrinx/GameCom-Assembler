@@ -31,14 +31,17 @@ The examples are:
 - `examples/hello_world`
 - `examples/sound_tests_asm`
 - `examples/cycle_count_test`
+- `examples/tetris`
 
 Each example emits `.raw`, `.lst`, and signed 1 MiB `.tgc` files under its
-local `build/` directory.
+local build directory. Tetris also emits an intermediate packed image because
+it has separate binary graphics banks.
 
 The example cartridges use normal BIOS-menu entry behavior. Init/reset/close
 commands return to the BIOS, and the program starts only when the BIOS issues
 the execute command after the cartridge is selected. They advertise no cart
 icon (`icon bank 0`) until a real icon image bank is supplied.
+Tetris is the exception: it carries its original icon graphics in bank `0x24`.
 
 ## Common Commands
 

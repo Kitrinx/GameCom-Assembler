@@ -49,6 +49,7 @@ struct symbols {
 struct assembler {
 	struct lines lines;
 	struct symbols symbols;
+	const char *root_path;
 	int case_sensitive;
 	int resolve_pass;
 	char error[512];
@@ -657,6 +658,7 @@ static void parse_loaded_text(struct assembler *as, const char *path, char *text
 			char *stripped = strip_comment(cursor);
 			char *head = NULL;
 			char *rest = NULL;
+			int stop_file = 0;
 			split_head(stripped, &head, &rest);
 			if (str_eq_lit(head, "include") && rest[0]) {
 				int count = 0;
@@ -665,7 +667,10 @@ static void parse_loaded_text(struct assembler *as, const char *path, char *text
 					char *inc = string_or_bare(ops[0]);
 					char *dir = dirname_copy(path);
 					char *inc_path = join_path(dir, inc);
-					if (!load_lines(as, inc_path))
+					int loaded = load_lines(as, inc_path);
+					if (!loaded && !as->error[0] && strcmp(inc_path, inc) != 0)
+						loaded = load_lines(as, inc);
+					if (!loaded && !as->error[0])
 						set_errorf(as, "cannot include %s", inc_path);
 					free(inc_path);
 					free(dir);
@@ -676,10 +681,14 @@ static void parse_loaded_text(struct assembler *as, const char *path, char *text
 				free(ops);
 			} else {
 				parse_line(as, path, line_no, cursor);
+				if (str_eq_lit(head, "end"))
+					stop_file = 1;
 			}
 			free(head);
 			free(rest);
 			free(stripped);
+			if (stop_file)
+				break;
 		}
 		if (saved == '\r' && eol[1] == '\n')
 			eol++;
@@ -1013,14 +1022,34 @@ static int imm8(struct assembler *as, const char *text, int pc)
 	return u8(as, imm_value(as, text, pc), text);
 }
 
+static int parse_register_number_token(char *text, int *out)
+{
+	size_t len = strlen(text);
+	int base = 10;
+	char *endp;
+	long value;
+	if (!len)
+		return 0;
+	if (text[len - 1] == 'h' || text[len - 1] == 'H') {
+		text[--len] = '\0';
+		base = 16;
+		if (!len)
+			return 0;
+	}
+	errno = 0;
+	value = strtol(text, &endp, base);
+	if (errno || endp == text || *endp || value < 0 || value > 0xff)
+		return 0;
+	*out = (int)value;
+	return 1;
+}
+
 static int direct_register_value(struct assembler *as, const char *text, int *out)
 {
 	char *t = strip_operand_size_hint_copy(text);
 	char *p = t;
 	int rr = 0;
 	int value;
-	char *endp;
-	size_t len;
 	if (!strncasecmp(p, "rr", 2)) {
 		rr = 1;
 		p += 2;
@@ -1036,26 +1065,7 @@ static int direct_register_value(struct assembler *as, const char *text, int *ou
 		return 0;
 	}
 	(void)rr;
-	len = strlen(p);
-	if (!len) {
-		free(t);
-		return 0;
-	}
-	if (p[len - 1] == 'h' || p[len - 1] == 'H') {
-		p[len - 1] = '\0';
-		value = (int)strtol(p, &endp, 16);
-		if (!endp || endp == p || *endp) {
-			free(t);
-			return 0;
-		}
-	} else {
-		value = (int)strtol(p, &endp, len > 1 ? 16 : 10);
-		if (!endp || endp == p || *endp) {
-			free(t);
-			return 0;
-		}
-	}
-	if (value >= 0 && value <= 0xff) {
+	if (parse_register_number_token(p, &value)) {
 		*out = value;
 		free(t);
 		return 1;
@@ -1079,15 +1089,8 @@ static int op_reg(const char *text)
 	char *t = trim_copy_range(text, strlen(text));
 	int value = -1;
 	if ((tolower((unsigned char)t[0]) == 'r') && t[1]) {
-		char *p = t + 1;
-		size_t len = strlen(p);
-		if (p[len - 1] == 'h' || p[len - 1] == 'H')
-			p[--len] = '\0';
-		if ((len == 1 && isdigit((unsigned char)p[0])) || (len == 2 && p[0] == '0' && isdigit((unsigned char)p[1]))) {
-			value = p[len - 1] - '0';
-			if (value < 0 || value > 7)
-				value = -1;
-		}
+		if (!parse_register_number_token(t + 1, &value) || value < 0 || value > 7)
+			value = -1;
 	}
 	free(t);
 	return value;
@@ -1097,17 +1100,10 @@ static int pi_reg(struct assembler *as, const char *text, int pc)
 {
 	char *t = trim_copy_range(text, strlen(text));
 	int value = -1;
+	int direct;
 	(void)pc;
-	if (tolower((unsigned char)t[0]) == 'r' && t[1] == '1' && isdigit((unsigned char)t[2]) &&
-		(t[3] == '\0' || ((t[3] == 'h' || t[3] == 'H') && t[4] == '\0'))) {
-		value = t[2] - '0';
-		if (value < 0 || value > 7)
-			value = -1;
-	} else {
-		int direct;
-		if (direct_register_value(as, text, &direct) && direct >= 0x10 && direct <= 0x17)
-			value = direct - 0x10;
-	}
+	if (direct_register_value(as, text, &direct) && direct >= 0x10 && direct <= 0x17)
+		value = direct - 0x10;
 	free(t);
 	return value;
 }
@@ -1116,24 +1112,14 @@ static int parse_pair_base(const char *text)
 {
 	char *t = trim_copy_range(text, strlen(text));
 	char *p = t;
-	size_t len;
 	int value = -1;
 	if (tolower((unsigned char)p[0]) != 'r' || tolower((unsigned char)p[1]) != 'r') {
 		free(t);
 		return -1;
 	}
 	p += 2;
-	len = strlen(p);
-	if (!len) {
-		free(t);
-		return -1;
-	}
-	if (p[len - 1] == 'h' || p[len - 1] == 'H') {
-		p[len - 1] = '\0';
-		value = (int)strtol(p, NULL, 16);
-	} else {
-		value = (int)strtol(p, NULL, len > 1 ? 16 : 10);
-	}
+	if (!parse_register_number_token(p, &value))
+		value = -1;
 	free(t);
 	return value;
 }
@@ -1170,15 +1156,8 @@ static int indirect_byte_reg(const char *text)
 	char *t = trim_copy_range(text, strlen(text));
 	int value = -1;
 	if (tolower((unsigned char)t[0]) == 'r' && tolower((unsigned char)t[1]) == 'r') {
-		char *p = t + 2;
-		size_t len = strlen(p);
-		if (p[len - 1] == 'h' || p[len - 1] == 'H')
-			p[--len] = '\0';
-		if ((len == 1 && isdigit((unsigned char)p[0])) || (len == 2 && p[0] == '0' && isdigit((unsigned char)p[1]))) {
-			value = p[len - 1] - '0';
-			if (value < 0 || value > 7)
-				value = -1;
-		}
+		if (!parse_register_number_token(t + 2, &value) || value < 0 || value > 7)
+			value = -1;
 	}
 	free(t);
 	return value;
@@ -2129,7 +2108,8 @@ static void assembler_pass(struct assembler *as, int resolve)
 		if (!line->op)
 			continue;
 		if (str_eq_lit(line->op, "end")) {
-			stopped = 1;
+			if (!as->root_path || strcmp(line->path, as->root_path) == 0)
+				stopped = 1;
 			continue;
 		}
 		if (str_eq_lit(line->op, "data")) {
@@ -2192,6 +2172,7 @@ static int assemble(struct assembler *as, const char *source, const char *base_e
 	size_t iter;
 	char *last_sig = NULL;
 	(void)last_sig;
+	as->root_path = source;
 	if (!load_lines(as, source)) {
 		if (!as->error[0])
 			snprintf(as->error, sizeof(as->error), "cannot read source %s", source);
