@@ -48,6 +48,7 @@ struct symbols {
 
 struct obj_fixup {
 	uint16_t address;
+	int addend;
 	char *name;
 };
 
@@ -64,6 +65,9 @@ struct assembler {
 	const char *root_path;
 	int case_sensitive;
 	int object_mode;
+	int sdk_compat;
+	int have_initial_pc;
+	uint16_t initial_pc;
 	int resolve_pass;
 	char error[512];
 };
@@ -74,6 +78,8 @@ struct memref {
 	int reg;
 	int offset;
 	int width;
+	char *fixup_name;
+	int fixup_addend;
 };
 
 struct bitmem {
@@ -119,9 +125,10 @@ static const struct {
 	const char *name;
 	int value;
 } predefined[] = {
-	{ "PS0", 0x1d }, { "PS1", 0x1e }, { "SYS", 0x19 }, { "IE0", 0x10 }, { "IE1", 0x11 },
-	{ "IR0", 0x12 }, { "IR1", 0x13 }, { "P0", 0x14 }, { "P1", 0x15 }, { "P2", 0x16 },
-	{ "P0C", 0x20 }, { "P1C", 0x21 }, { "P2C", 0x22 }, { "LCC", 0x30 }, { "LCDC", 0x30 },
+	{ "PS0", 0x1e }, { "PS1", 0x1f }, { "SYS", 0x19 }, { "SP", 0x1c }, { "IE0", 0x10 }, { "IE1", 0x11 },
+	{ "IR0", 0x12 }, { "IR1", 0x13 }, { "P0", 0x14 }, { "P1", 0x15 }, { "P2", 0x16 }, { "P3", 0x17 },
+	{ "P0C", 0x20 }, { "P1C", 0x21 }, { "P2C", 0x22 }, { "P3C", 0x23 }, { "LCC", 0x30 }, { "LCDC", 0x30 },
+	{ "MMU0", 0x24 }, { "MMU1", 0x25 }, { "MMU2", 0x26 }, { "MMU3", 0x27 }, { "MMU4", 0x28 },
 	{ "LCH", 0x31 }, { "LCV", 0x32 }, { "DMC", 0x34 }, { "DMX1", 0x35 }, { "DMY1", 0x36 },
 	{ "DMDX", 0x37 }, { "DMDY", 0x38 }, { "DMX2", 0x39 }, { "DMY2", 0x3a }, { "DMPL", 0x3b },
 	{ "DMBR", 0x3c }, { "DMVP", 0x3d }, { "SGC", 0x40 }, { "SG0L", 0x42 }, { "SG1L", 0x44 },
@@ -338,7 +345,7 @@ static void fixups_free(struct obj_fixups *fixups)
 	fixups->cap = 0;
 }
 
-static void fixup_add(struct assembler *as, uint16_t address, const char *name)
+static void fixup_add(struct assembler *as, uint16_t address, const char *name, int addend)
 {
 	struct obj_fixup *fixup;
 	if (as->fixups.size == as->fixups.cap) {
@@ -347,6 +354,7 @@ static void fixup_add(struct assembler *as, uint16_t address, const char *name)
 	}
 	fixup = &as->fixups.items[as->fixups.size++];
 	fixup->address = address;
+	fixup->addend = addend;
 	fixup->name = canon_name(as, name);
 }
 
@@ -354,13 +362,27 @@ static void init_symbols(struct assembler *as)
 {
 	size_t i;
 	char name[16];
-	for (i = 0; i < sizeof(predefined) / sizeof(predefined[0]); i++)
+	for (i = 0; i < sizeof(predefined) / sizeof(predefined[0]); i++) {
 		symbol_set(as, predefined[i].name, predefined[i].value);
+		if (as->case_sensitive) {
+			char *lower = canon_name(&(struct assembler){ .case_sensitive = 0 }, predefined[i].name);
+			symbol_set(as, lower, predefined[i].value);
+			free(lower);
+		}
+	}
 	for (i = 0; i < 16; i++) {
 		snprintf(name, sizeof(name), "SG0W%zu", i);
 		symbol_set(as, name, 0x60 + (int)i);
+		if (as->case_sensitive) {
+			snprintf(name, sizeof(name), "sg0w%zu", i);
+			symbol_set(as, name, 0x60 + (int)i);
+		}
 		snprintf(name, sizeof(name), "SG1W%zu", i);
 		symbol_set(as, name, 0x70 + (int)i);
+		if (as->case_sensitive) {
+			snprintf(name, sizeof(name), "sg1w%zu", i);
+			symbol_set(as, name, 0x70 + (int)i);
+		}
 	}
 }
 
@@ -642,6 +664,10 @@ static void parse_line(struct assembler *as, const char *path, int line_no, cons
 			free(rest_tail);
 		}
 	}
+	if (!line.label && as->sdk_compat && !rest[0] && is_symbol_name(head) && !is_directive(head) && !is_mnemonic(head)) {
+		line.label = head;
+		head = NULL;
+	}
 	line.op = head;
 	line.operands = split_operands(rest, &line.operand_count);
 	free(rest);
@@ -755,6 +781,7 @@ static void expr_skip(struct expr *ex)
 }
 
 static int parse_expr_or(struct expr *ex);
+static int parse_expr_root(struct expr *ex);
 
 static int is_hex_suffix_token(const char *start, size_t len)
 {
@@ -799,7 +826,7 @@ static int parse_primary(struct expr *ex)
 	if (s[ex->pos] == '(') {
 		int value;
 		ex->pos++;
-		value = parse_expr_or(ex);
+		value = parse_expr_root(ex);
 		expr_skip(ex);
 		if (s[ex->pos] != ')') {
 			ex->ok = 0;
@@ -890,6 +917,63 @@ static int parse_unary(struct expr *ex)
 		return ~parse_unary(ex);
 	}
 	return parse_primary(ex);
+}
+
+static int parse_expr_ltr(struct expr *ex)
+{
+	int value = parse_unary(ex);
+	while (ex->ok) {
+		int rhs;
+		expr_skip(ex);
+		if (ex->text[ex->pos] == '<' && ex->text[ex->pos + 1] == '<') {
+			ex->pos += 2;
+			value <<= parse_unary(ex);
+		} else if (ex->text[ex->pos] == '>' && ex->text[ex->pos + 1] == '>') {
+			ex->pos += 2;
+			value >>= parse_unary(ex);
+		} else if (ex->text[ex->pos] == '*') {
+			ex->pos++;
+			value *= parse_unary(ex);
+		} else if (ex->text[ex->pos] == '/') {
+			ex->pos++;
+			if (ex->text[ex->pos] == '/')
+				ex->pos++;
+			rhs = parse_unary(ex);
+			if (!rhs) {
+				ex->ok = 0;
+				set_error(ex->as, "division by zero");
+				return 0;
+			}
+			value /= rhs;
+		} else if (ex->text[ex->pos] == '%') {
+			ex->pos++;
+			rhs = parse_unary(ex);
+			if (!rhs) {
+				ex->ok = 0;
+				set_error(ex->as, "division by zero");
+				return 0;
+			}
+			value %= rhs;
+		} else if (ex->text[ex->pos] == '+') {
+			ex->pos++;
+			value += parse_unary(ex);
+		} else if (ex->text[ex->pos] == '-') {
+			ex->pos++;
+			value -= parse_unary(ex);
+		} else if (ex->text[ex->pos] == '&') {
+			ex->pos++;
+			value &= parse_unary(ex);
+		} else if (ex->text[ex->pos] == '^') {
+			ex->pos++;
+			value ^= parse_unary(ex);
+		} else if (ex->text[ex->pos] == '|') {
+			ex->pos++;
+			value |= parse_unary(ex);
+		} else {
+			break;
+		}
+	}
+	return value;
 }
 
 static int parse_mul(struct expr *ex)
@@ -1000,6 +1084,11 @@ static int parse_expr_or(struct expr *ex)
 	return value;
 }
 
+static int parse_expr_root(struct expr *ex)
+{
+	return ex->as->sdk_compat ? parse_expr_ltr(ex) : parse_expr_or(ex);
+}
+
 static int eval_expr(struct assembler *as, const char *text, int pc, int *ok)
 {
 	struct expr ex;
@@ -1015,7 +1104,7 @@ static int eval_expr(struct assembler *as, const char *text, int pc, int *ok)
 	ex.pos = 0;
 	ex.pc = pc;
 	ex.ok = 1;
-	value = parse_expr_or(&ex);
+	value = parse_expr_root(&ex);
 	expr_skip(&ex);
 	if (ex.text[ex.pos]) {
 		ex.ok = 0;
@@ -1044,6 +1133,100 @@ static char *unresolved_simple_symbol(struct assembler *as, const char *text)
 	body = canon_name(as, body);
 	free(sized);
 	return body;
+}
+
+static int unresolved_symbol_addend(struct assembler *as, const char *text, int pc, char **name, int *addend)
+{
+	char *sized = strip_operand_size_hint_copy(text);
+	char *body = sized;
+	char *external;
+	size_t i;
+	while (isspace((unsigned char)*body))
+		body++;
+	if (*body == '#')
+		body++;
+	trim_owned(body);
+	external = unresolved_simple_symbol(as, body);
+	if (external) {
+		*name = external;
+		*addend = 0;
+		free(sized);
+		return 1;
+	}
+	for (i = 1; body[i]; i++) {
+		char op = body[i];
+		char *left;
+		char *right;
+		int ok = 0;
+		int value;
+		if (op != '+' && op != '-')
+			continue;
+		left = trim_copy_range(body, i);
+		right = trim_copy_range(body + i + 1, strlen(body + i + 1));
+		external = unresolved_simple_symbol(as, left);
+		if (external) {
+			value = eval_expr(as, right, pc, &ok);
+			free(left);
+			free(right);
+			if (ok) {
+				*name = external;
+				*addend = (op == '+') ? value : -value;
+				free(sized);
+				return 1;
+			}
+			free(external);
+			free(sized);
+			return 0;
+		}
+		if (op == '+') {
+			external = unresolved_simple_symbol(as, right);
+			if (external) {
+				value = eval_expr(as, left, pc, &ok);
+				free(left);
+				free(right);
+				if (ok) {
+					*name = external;
+					*addend = value;
+					free(sized);
+					return 1;
+				}
+				free(external);
+				free(sized);
+				return 0;
+			}
+		}
+		free(left);
+		free(right);
+	}
+	free(sized);
+	return 0;
+}
+
+static int u16(struct assembler *as, int value, const char *what);
+static int imm_value(struct assembler *as, const char *text, int pc);
+
+static void emit_word_expr_or_fixup(struct assembler *as, struct bytes *out, const char *text, int pc)
+{
+	if (as->object_mode) {
+		char *external = NULL;
+		int addend = 0;
+		if (unresolved_symbol_addend(as, text, pc, &external, &addend)) {
+			if (as->resolve_pass)
+				fixup_add(as, (uint16_t)(pc + out->size), external, addend);
+			bytes_emit_word(out, 0);
+			free(external);
+			return;
+		}
+		external = unresolved_simple_symbol(as, text);
+		if (external) {
+			if (as->resolve_pass)
+				fixup_add(as, (uint16_t)(pc + out->size), external, 0);
+			bytes_emit_word(out, 0);
+			free(external);
+			return;
+		}
+	}
+	bytes_emit_word(out, u16(as, imm_value(as, text, pc), text));
 }
 
 static int u8(struct assembler *as, int value, const char *what)
@@ -1275,9 +1458,10 @@ static int split_outer_paren(const char *text, char **before, char **inside, int
 
 static struct memref parse_indirect(struct assembler *as, const char *text, int pc, int word_ptr)
 {
-	struct memref out = { 0, 0, 0, 0, word_ptr ? 16 : 8 };
+	struct memref out = { 0 };
 	char *t = trim_copy_range(text, strlen(text));
 	int (*reg_parser)(const char *) = word_ptr ? desc_pair_sel : op_reg;
+	out.width = word_ptr ? 16 : 8;
 	if (t[0] == '@') {
 		int reg = reg_parser(t + 1);
 		int value;
@@ -1328,7 +1512,16 @@ static struct memref parse_indirect(struct assembler *as, const char *text, int 
 					set_error(as, "indexed r0/rr0 form is reserved; use @absolute");
 				} else {
 					int ok = 0;
-					int value = eval_expr(as, before, pc, &ok);
+					int value = 0;
+					char *external = NULL;
+					int addend = 0;
+					if (as->object_mode && unresolved_symbol_addend(as, before, pc, &external, &addend)) {
+						out.fixup_name = external;
+						out.fixup_addend = addend;
+						ok = 1;
+					} else {
+						value = eval_expr(as, before, pc, &ok);
+					}
 					out.valid = 1;
 					out.mode = 2;
 					out.reg = reg;
@@ -1342,7 +1535,16 @@ static struct memref parse_indirect(struct assembler *as, const char *text, int 
 					reg = reg_parser(left);
 					if (reg >= 0) {
 						int ok = 0;
-						int value = eval_expr(as, right, pc, &ok);
+						int value = 0;
+						char *external = NULL;
+						int addend = 0;
+						if (as->object_mode && unresolved_symbol_addend(as, right, pc, &external, &addend)) {
+							out.fixup_name = external;
+							out.fixup_addend = addend;
+							ok = 1;
+						} else {
+							value = eval_expr(as, right, pc, &ok);
+						}
 						out.valid = 1;
 						out.mode = 2;
 						out.reg = reg;
@@ -1362,8 +1564,9 @@ static struct memref parse_indirect(struct assembler *as, const char *text, int 
 
 static struct memref parse_indirect_imm_ref(struct assembler *as, const char *text, int pc)
 {
-	struct memref out = { 0, 0, 0, 0, 8 };
+	struct memref out = { 0 };
 	char *t = trim_copy_range(text, strlen(text));
+	out.width = 8;
 	if (t[0] == '@') {
 		int reg = indirect_byte_reg(t + 1);
 		int value;
@@ -1434,7 +1637,7 @@ static struct memref parse_indirect_imm_ref(struct assembler *as, const char *te
 	return out;
 }
 
-static void emit_mem_desc(struct bytes *out, int opcode, int reg, struct memref mem)
+static void emit_mem_desc(struct assembler *as, struct bytes *out, int opcode, int reg, struct memref mem, int pc)
 {
 	int desc = (mem.mode << 6) | (reg << 3) | mem.reg;
 	bytes_emit(out, opcode);
@@ -1443,9 +1646,16 @@ static void emit_mem_desc(struct bytes *out, int opcode, int reg, struct memref 
 		if (mem.width == 8) {
 			bytes_emit(out, mem.offset & 0xff);
 		} else {
-			bytes_emit_word(out, mem.offset);
+			if (mem.fixup_name) {
+				if (as->resolve_pass)
+					fixup_add(as, (uint16_t)(pc + out->size), mem.fixup_name, mem.fixup_addend);
+				bytes_emit_word(out, 0);
+			} else {
+				bytes_emit_word(out, mem.offset);
+			}
 		}
 	}
+	free(mem.fixup_name);
 }
 
 static int absolute_word_source(struct assembler *as, const char *text, int pc, int *value)
@@ -1466,6 +1676,39 @@ static int absolute_word_source(struct assembler *as, const char *text, int pc, 
 		return 1;
 	}
 	return 0;
+}
+
+static int absolute_word_memory_operand(struct assembler *as, const char *text, int pc, int *value)
+{
+	int direct;
+	int expr_value;
+	int hint = operand_size_hint(text);
+	if (looks_immediate(text))
+		return 0;
+	if (hint == 8)
+		return 0;
+	if (direct_register_value(as, text, &direct))
+		return 0;
+	if (as->object_mode) {
+		char *external = unresolved_simple_symbol(as, text);
+		if (external) {
+			free(external);
+			*value = 0;
+			return 1;
+		}
+	}
+	if (!maybe_expr(as, text, pc, &expr_value))
+		return 0;
+	if (hint == 16 || expr_value > 0xff || expr_value < 0) {
+		*value = u16(as, expr_value, text);
+		return 1;
+	}
+	return 0;
+}
+
+static void emit_absolute_word_operand(struct assembler *as, struct bytes *out, const char *text, int pc)
+{
+	emit_word_expr_or_fixup(as, out, text, pc);
 }
 
 static int rel8(struct assembler *as, const char *text, int pc, int size)
@@ -1575,7 +1818,7 @@ static int encode_byte_indirect_load(struct assembler *as, struct bytes *out, in
 	mem = parse_indirect(as, ops[1], pc, word_ptr);
 	if (!mem.valid)
 		return 0;
-	emit_mem_desc(out, opcode, dst, mem);
+	emit_mem_desc(as, out, opcode, dst, mem, pc);
 	return 1;
 }
 
@@ -1583,16 +1826,22 @@ static int encode_movw(struct assembler *as, struct bytes *out, char **ops, int 
 {
 	int dst_sel = desc_pair_sel(ops[0]);
 	if (dst_sel >= 0 && looks_immediate(ops[1])) {
-		int value = u16(as, imm_value(as, ops[1], pc), ops[1]);
 		bytes_emit(out, 0x78 | dst_sel);
-		bytes_emit_word(out, value);
+		emit_word_expr_or_fixup(as, out, ops[1], pc);
 		return 1;
 	}
 	if (dst_sel >= 0) {
 		struct memref mem = parse_indirect(as, ops[1], pc, 1);
 		int src_sel;
+		int abs;
 		if (mem.valid) {
-			emit_mem_desc(out, 0x3a, dst_sel, mem);
+			emit_mem_desc(as, out, 0x3a, dst_sel, mem, pc);
+			return 1;
+		}
+		if (absolute_word_memory_operand(as, ops[1], pc, &abs)) {
+			bytes_emit(out, 0x3a);
+			bytes_emit(out, 0x80 | (dst_sel << 3));
+			emit_absolute_word_operand(as, out, ops[1], pc);
 			return 1;
 		}
 		src_sel = desc_pair_sel(ops[1]);
@@ -1606,15 +1855,23 @@ static int encode_movw(struct assembler *as, struct bytes *out, char **ops, int 
 		struct memref mem = parse_indirect(as, ops[0], pc, 1);
 		int src_sel = desc_pair_sel(ops[1]);
 		if (mem.valid && src_sel >= 0) {
-			emit_mem_desc(out, 0x3b, src_sel, mem);
+			emit_mem_desc(as, out, 0x3b, src_sel, mem, pc);
 			return 1;
+		}
+		if (src_sel >= 0) {
+			int abs;
+			if (absolute_word_memory_operand(as, ops[0], pc, &abs)) {
+				bytes_emit(out, 0x3b);
+				bytes_emit(out, 0x80 | (src_sel << 3));
+				emit_absolute_word_operand(as, out, ops[0], pc);
+				return 1;
+			}
 		}
 	}
 	if (looks_immediate(ops[1])) {
-		int value = u16(as, imm_value(as, ops[1], pc), ops[1]);
 		bytes_emit(out, 0x4b);
 		bytes_emit(out, direct8(as, ops[0], pc));
-		bytes_emit_word(out, value);
+		emit_word_expr_or_fixup(as, out, ops[1], pc);
 		return 1;
 	}
 	bytes_emit(out, 0x4a);
@@ -1653,12 +1910,12 @@ static int encode_mov(struct assembler *as, struct bytes *out, char **ops, int p
 	if (dst_op >= 0) {
 		mem = parse_indirect(as, ops[1], pc, 0);
 		if (mem.valid) {
-			emit_mem_desc(out, 0x28, dst_op, mem);
+			emit_mem_desc(as, out, 0x28, dst_op, mem, pc);
 			return 1;
 		}
 		mem = parse_indirect(as, ops[1], pc, 1);
 		if (mem.valid) {
-			emit_mem_desc(out, 0x38, dst_op, mem);
+			emit_mem_desc(as, out, 0x38, dst_op, mem, pc);
 			return 1;
 		}
 		if (absolute_word_source(as, ops[1], pc, &abs)) {
@@ -1674,13 +1931,22 @@ static int encode_mov(struct assembler *as, struct bytes *out, char **ops, int p
 	mem = parse_indirect(as, ops[0], pc, 0);
 	src_op = op_reg(ops[1]);
 	if (mem.valid && src_op >= 0) {
-		emit_mem_desc(out, 0x29, src_op, mem);
+		emit_mem_desc(as, out, 0x29, src_op, mem, pc);
 		return 1;
 	}
 	mem = parse_indirect(as, ops[0], pc, 1);
 	if (mem.valid && src_op >= 0) {
-		emit_mem_desc(out, 0x39, src_op, mem);
+		emit_mem_desc(as, out, 0x39, src_op, mem, pc);
 		return 1;
+	}
+	if (src_op >= 0) {
+		int dst_abs;
+		if (absolute_word_memory_operand(as, ops[0], pc, &dst_abs)) {
+			bytes_emit(out, 0x39);
+			bytes_emit(out, 0x80 | (src_op << 3));
+			emit_absolute_word_operand(as, out, ops[0], pc);
+			return 1;
+		}
 	}
 	if (looks_immediate(ops[1])) {
 		bytes_emit(out, 0x58);
@@ -1788,6 +2054,13 @@ static int encode_jmp_call(struct assembler *as, struct bytes *out, int indirect
 			char *before = NULL;
 			char *inside = NULL;
 			int plus_after = 0;
+			int body_sel = desc_pair_sel(body);
+			if (body_sel >= 0) {
+				bytes_emit(out, indirect_opcode);
+				bytes_emit(out, body_sel);
+				free(body);
+				return 1;
+			}
 			if (split_outer_paren(body, &before, &inside, &plus_after) && before[0] && !plus_after) {
 				int reg = op_reg(inside);
 				if (reg <= 0)
@@ -1815,7 +2088,7 @@ static int encode_jmp_call(struct assembler *as, struct bytes *out, int indirect
 			if (external) {
 				bytes_emit(out, is_call ? 0x49 : 0x98);
 				if (as->resolve_pass)
-					fixup_add(as, (uint16_t)(pc + 1), external);
+					fixup_add(as, (uint16_t)(pc + 1), external, 0);
 				bytes_emit_word(out, 0);
 				free(external);
 				return 1;
@@ -1834,7 +2107,7 @@ static int encode_jmp_call(struct assembler *as, struct bytes *out, int indirect
 			char *external = unresolved_simple_symbol(as, ops[1]);
 			if (external) {
 				if (as->resolve_pass)
-					fixup_add(as, (uint16_t)(pc + 1), external);
+					fixup_add(as, (uint16_t)(pc + 1), external, 0);
 				bytes_emit_word(out, 0);
 				free(external);
 				return 1;
@@ -1962,10 +2235,9 @@ static int encode_instruction(struct assembler *as, struct line *line, struct by
 	idx = list_index(m, word_alu_names, sizeof(word_alu_names) / sizeof(word_alu_names[0]));
 	if (idx >= 0 && n == 2) {
 		if (looks_immediate(ops[1])) {
-			int value = u16(as, imm_value(as, ops[1], pc), ops[1]);
 			bytes_emit(out, 0x68 + idx);
 			bytes_emit(out, direct8(as, ops[0], pc));
-			bytes_emit_word(out, value);
+			emit_word_expr_or_fixup(as, out, ops[1], pc);
 		} else {
 			bytes_emit(out, 0x60 + idx);
 			bytes_emit(out, direct8(as, ops[1], pc));
@@ -1992,15 +2264,10 @@ static int encode_instruction(struct assembler *as, struct line *line, struct by
 			bytes_emit(out, direct8(as, ops[0], pc));
 			return 1;
 		}
-		{
-			int dst = desc_pair_sel(ops[0]);
-			int src = desc_pair_sel(ops[1]);
-			if (dst >= 0 && src >= 0) {
-				bytes_emit(out, 0x5c);
-				bytes_emit(out, (dst << 3) | src);
-				return 1;
-			}
-		}
+		bytes_emit(out, 0x5c);
+		bytes_emit(out, direct8(as, ops[1], pc));
+		bytes_emit(out, direct8(as, ops[0], pc));
+		return 1;
 	}
 	if (str_eq_lit(m, "movm") && n == 3) {
 		bytes_emit(out, looks_immediate(ops[2]) ? 0x5f : 0x5e);
@@ -2094,7 +2361,7 @@ static void encode_directive(struct assembler *as, struct line *line, struct byt
 				char *external = unresolved_simple_symbol(as, line->operands[i]);
 				if (external) {
 					if (as->resolve_pass)
-						fixup_add(as, (uint16_t)(pc + out->size), external);
+						fixup_add(as, (uint16_t)(pc + out->size), external, 0);
 					bytes_emit_word(out, 0);
 					free(external);
 					continue;
@@ -2182,9 +2449,49 @@ static void encode_directive(struct assembler *as, struct line *line, struct byt
 	set_errorf(as, "unsupported directive %s", op);
 }
 
+static int eval_equ_expr(struct assembler *as, const char *text, int pc)
+{
+	int ok = 0;
+	int value;
+	if (as->sdk_compat) {
+		char *sdk_text = xstrdup(text);
+		char *dash = strstr(sdk_text, "--");
+		if (dash) {
+			*dash = '\0';
+			trim_owned(sdk_text);
+			as->error[0] = '\0';
+			value = eval_expr(as, sdk_text, pc, &ok);
+			free(sdk_text);
+			if (ok)
+				return value;
+		} else {
+			free(sdk_text);
+		}
+	}
+	value = eval_expr(as, text, pc, &ok);
+	if (ok || !as->sdk_compat)
+		return value;
+	{
+		char old_error[sizeof(as->error)];
+		char *prefix;
+		size_t len = 0;
+		memcpy(old_error, as->error, sizeof(old_error));
+		as->error[0] = '\0';
+		while (text[len] && !isspace((unsigned char)text[len]))
+			len++;
+		prefix = trim_copy_range(text, len);
+		value = eval_expr(as, prefix, pc, &ok);
+		free(prefix);
+		if (ok)
+			return value;
+		memcpy(as->error, old_error, sizeof(old_error));
+		return value;
+	}
+}
+
 static void assembler_pass(struct assembler *as, int resolve)
 {
-	uint16_t code_pc = 0;
+	uint16_t code_pc = as->have_initial_pc ? as->initial_pc : 0;
 	uint16_t data_pc = 0;
 	int section_code = 1;
 	int stopped = 0;
@@ -2234,10 +2541,9 @@ static void assembler_pass(struct assembler *as, int resolve)
 			continue;
 		}
 		if (line_is_equ) {
-			int ok = 0;
 			const char *name = line->label ? line->label : line->operands[0];
 			const char *expr = line->label ? line->operands[0] : line->operands[1];
-			symbol_set(as, name, eval_expr(as, expr, pc, &ok));
+			symbol_set(as, name, eval_equ_expr(as, expr, pc));
 			continue;
 		}
 		if (section_code || is_directive(line->op)) {
@@ -2469,7 +2775,9 @@ static void write_object_file(struct assembler *as, const char *path, const stru
 			exit(1);
 		}
 		write_u32_le(fp, offset);
-		fputc(1, fp);
+		fputc(as->fixups.items[i].addend ? 2 : 1, fp);
+		if (as->fixups.items[i].addend)
+			write_u16_le(fp, (uint16_t)as->fixups.items[i].addend);
 		write_u16_le(fp, (unsigned)len);
 		fwrite(as->fixups.items[i].name, 1, len, fp);
 	}
@@ -2516,7 +2824,7 @@ static void write_listing(struct assembler *as, const char *path)
 
 static void usage(void)
 {
-	fprintf(stderr, "usage: gamecom-as SOURCE -o OUTPUT [--obj] [--lst LISTING] [--base EXPR] [--define NAME=EXPR] [--case-sensitive]\n");
+	fprintf(stderr, "usage: gamecom-as SOURCE -o OUTPUT [--obj] [--lst LISTING] [--base EXPR] [--start EXPR] [--define NAME=EXPR] [--case-sensitive] [--sdk-compat]\n");
 	exit(1);
 }
 
@@ -2544,8 +2852,15 @@ int main(int argc, char **argv)
 			if (++i >= argc)
 				usage();
 			base_expr = argv[i];
+		} else if (strcmp(argv[i], "--start") == 0 || strcmp(argv[i], "--org") == 0) {
+			if (++i >= argc)
+				usage();
+			as.have_initial_pc = 1;
+			as.initial_pc = (uint16_t)eval_expr(&as, argv[i], 0, NULL);
 		} else if (strcmp(argv[i], "--obj") == 0 || strcmp(argv[i], "--object") == 0) {
 			as.object_mode = 1;
+		} else if (strcmp(argv[i], "--sdk-compat") == 0 || strcmp(argv[i], "--asm8521-compat") == 0) {
+			as.sdk_compat = 1;
 		} else if (strcmp(argv[i], "--case-sensitive") == 0) {
 			as.case_sensitive = 1;
 		} else if (strcmp(argv[i], "--define") == 0) {

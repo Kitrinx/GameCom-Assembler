@@ -5,6 +5,7 @@ BUILD_DIR := build
 BINS := $(BUILD_DIR)/gamecom-as $(BUILD_DIR)/gamecom-link $(BUILD_DIR)/gamecom-pack-hdk $(BUILD_DIR)/gamecom-romtool
 AS_BIN := $(BUILD_DIR)/gamecom-as
 LINK_BIN := $(BUILD_DIR)/gamecom-link
+PACK_BIN := $(BUILD_DIR)/gamecom-pack-hdk
 ROMTOOL := $(BUILD_DIR)/gamecom-romtool
 
 EXAMPLE_DIRS := \
@@ -45,11 +46,17 @@ test: coverage
 	$(AS_BIN) tests/fixtures/wla_style_ambiguity.asm -o $(BUILD_DIR)/wla_style_ambiguity.bin --lst $(BUILD_DIR)/wla_style_ambiguity.lst
 	xxd -p -c 1000000 $(BUILD_DIR)/wla_style_ambiguity.bin > $(BUILD_DIR)/wla_style_ambiguity.hex
 	diff -u tests/fixtures/wla_style_ambiguity.expected.hex $(BUILD_DIR)/wla_style_ambiguity.hex
+	$(AS_BIN) tests/fixtures/sdk_compat.asm -o $(BUILD_DIR)/sdk_compat.bin --lst $(BUILD_DIR)/sdk_compat.lst --start 4000h --sdk-compat --case-sensitive
+	xxd -p -c 1000000 $(BUILD_DIR)/sdk_compat.bin > $(BUILD_DIR)/sdk_compat.hex
+	diff -u tests/fixtures/sdk_compat.expected.hex $(BUILD_DIR)/sdk_compat.hex
 	$(AS_BIN) tests/fixtures/link_main.asm --obj -o $(BUILD_DIR)/link_main.gco --lst $(BUILD_DIR)/link_main.lst
 	$(AS_BIN) tests/fixtures/link_lib.asm --obj -o $(BUILD_DIR)/link_lib.gco --lst $(BUILD_DIR)/link_lib.lst
 	$(LINK_BIN) $(BUILD_DIR)/link_main.gco $(BUILD_DIR)/link_lib.gco -o $(BUILD_DIR)/link_test.bin --base 4000h --map $(BUILD_DIR)/link_test.map
 	xxd -p -c 1000000 $(BUILD_DIR)/link_test.bin > $(BUILD_DIR)/link_test.hex
 	diff -u tests/fixtures/link_test.expected.hex $(BUILD_DIR)/link_test.hex
+	$(PACK_BIN) tests/fixtures/pack_base.bin -o $(BUILD_DIR)/pack_test.bin --size 0x20 --program-offset 0x10 --fill 0xee --incbin tests/fixtures/pack_overlay.bin@0x04
+	xxd -p -c 1000000 $(BUILD_DIR)/pack_test.bin > $(BUILD_DIR)/pack_test.hex
+	diff -u tests/fixtures/pack_test.expected.hex $(BUILD_DIR)/pack_test.hex
 	$(ROMTOOL) build $(BUILD_DIR)/all_opcodes.bin -o $(BUILD_DIR)/signed_smoke.bin --title SMOKETEST --quiet
 	$(ROMTOOL) verify $(BUILD_DIR)/signed_smoke.bin --require-root both --quiet
 

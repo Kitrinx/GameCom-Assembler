@@ -14,6 +14,18 @@ struct buffer {
 	size_t size;
 };
 
+struct incbin {
+	char *path;
+	uint32_t offset;
+	struct buffer data;
+};
+
+struct incbin_list {
+	struct incbin *items;
+	size_t count;
+	size_t capacity;
+};
+
 static void fail(const char *message)
 {
 	fprintf(stderr, "gamecom-pack-hdk: error: %s\n", message);
@@ -35,6 +47,23 @@ static unsigned long parse_number(const char *text, unsigned long limit, const c
 	if (errno || end == text || *end != '\0' || value > limit)
 		fail(name);
 	return value;
+}
+
+static char *xstrndup(const char *text, size_t len)
+{
+	char *out = malloc(len + 1);
+	if (!out)
+		fail("out of memory");
+	memcpy(out, text, len);
+	out[len] = '\0';
+	return out;
+}
+
+static uint32_t checked_end(uint32_t offset, size_t size, const char *message)
+{
+	if (size > (size_t)(0xffffffffu - offset))
+		fail(message);
+	return offset + (uint32_t)size;
 }
 
 static struct buffer read_file(const char *path)
@@ -112,6 +141,28 @@ static void join_path(char *out, size_t out_size, const char *dir, const char *n
 		fail("path is too long");
 }
 
+static void incbin_push(struct incbin_list *list, const char *spec)
+{
+	const char *at = strrchr(spec, '@');
+	struct incbin item;
+
+	if (!at || at == spec || !at[1])
+		fail("bad incbin spec, expected PATH@OFFSET");
+	item.path = xstrndup(spec, (size_t)(at - spec));
+	item.offset = (uint32_t)parse_number(at + 1, 0xffffffffu, "bad incbin offset");
+	item.data.data = NULL;
+	item.data.size = 0;
+	if (list->count == list->capacity) {
+		size_t next_capacity = list->capacity ? list->capacity * 2 : 4;
+		struct incbin *next_items = realloc(list->items, next_capacity * sizeof(*next_items));
+		if (!next_items)
+			fail("out of memory");
+		list->items = next_items;
+		list->capacity = next_capacity;
+	}
+	list->items[list->count++] = item;
+}
+
 int main(int argc, char **argv)
 {
 	const char *input = NULL;
@@ -124,8 +175,11 @@ int main(int argc, char **argv)
 	struct buffer asm_data;
 	struct buffer hdk_data = { NULL, 0 };
 	size_t overlay_len;
+	uint32_t needed_size;
 	uint8_t *image;
+	struct incbin_list incbins = { NULL, 0, 0 };
 	int i;
+	size_t j;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) {
@@ -152,6 +206,10 @@ int main(int argc, char **argv)
 			if (++i >= argc)
 				fail("missing fill byte");
 			fill = (uint8_t)parse_number(argv[i], 0xffu, "bad fill byte");
+		} else if (strcmp(argv[i], "--incbin") == 0) {
+			if (++i >= argc)
+				fail("missing incbin spec");
+			incbin_push(&incbins, argv[i]);
 		} else if (!input) {
 			input = argv[i];
 		} else {
@@ -159,21 +217,29 @@ int main(int argc, char **argv)
 		}
 	}
 	if (!input || !output)
-		fail("usage: gamecom-pack-hdk INPUT -o OUTPUT [--hdk-data PATH] [--gfx-dir DIR] [--fill BYTE]");
+		fail("usage: gamecom-pack-hdk INPUT -o OUTPUT [--hdk-data PATH] [--gfx-dir DIR] [--incbin PATH@OFFSET] [--fill BYTE]");
 	asm_data = read_file(input);
 	if (hdk_data_path)
 		hdk_data = read_file(hdk_data_path);
 	overlay_len = asm_data.size > hdk_data.size ? asm_data.size : hdk_data.size;
+	needed_size = checked_end(program_offset, overlay_len, "program and HDK filler are too large");
+	for (j = 0; j < incbins.count; j++) {
+		uint32_t end;
+		incbins.items[j].data = read_file(incbins.items[j].path);
+		end = checked_end(incbins.items[j].offset, incbins.items[j].data.size, "incbin is outside output image");
+		if (end > needed_size)
+			needed_size = end;
+	}
 	if (!image_size)
-		image_size = (program_offset + overlay_len < 0x100000u) ? 0x100000u : 0x200000u;
-	if (!image_size || program_offset >= image_size || program_offset + overlay_len > image_size)
+		image_size = (needed_size <= 0x100000u) ? 0x100000u : 0x200000u;
+	if (!image_size || program_offset >= image_size || needed_size > image_size)
 		fail("program and HDK filler do not fit output image");
 	image = malloc(image_size);
 	if (!image)
 		fail("out of memory");
 	memset(image, fill, image_size);
-	for (i = 0; (size_t)i < overlay_len; i++)
-		image[program_offset + (uint32_t)i] = ((size_t)i < asm_data.size) ? asm_data.data[i] : hdk_data.data[i];
+	for (j = 0; j < overlay_len; j++)
+		image[program_offset + (uint32_t)j] = (j < asm_data.size) ? asm_data.data[j] : hdk_data.data[j];
 	if (gfx_dir) {
 		DIR *dir = opendir(gfx_dir);
 		struct dirent *ent;
@@ -201,9 +267,16 @@ int main(int argc, char **argv)
 		}
 		closedir(dir);
 	}
+	for (j = 0; j < incbins.count; j++)
+		memcpy(image + incbins.items[j].offset, incbins.items[j].data.data, incbins.items[j].data.size);
 	write_file(output, image, image_size);
 	free(asm_data.data);
 	free(hdk_data.data);
+	for (j = 0; j < incbins.count; j++) {
+		free(incbins.items[j].path);
+		free(incbins.items[j].data.data);
+	}
+	free(incbins.items);
 	free(image);
 	return 0;
 }

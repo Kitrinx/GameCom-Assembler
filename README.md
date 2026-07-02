@@ -29,7 +29,7 @@ Assembles SM8521/Game.com assembly into either flat bytes or a native object
 file for `gamecom-link`.
 
 ```bash
-build/gamecom-as SOURCE -o OUTPUT [--obj] [--lst LISTING] [--base EXPR] [--define NAME=EXPR] [--case-sensitive]
+build/gamecom-as SOURCE -o OUTPUT [--obj] [--lst LISTING] [--base EXPR] [--start EXPR] [--define NAME=EXPR] [--case-sensitive] [--sdk-compat]
 ```
 
 Options:
@@ -39,10 +39,17 @@ Options:
 - `--base EXPR`: choose the first address represented by the flat output. If
   omitted, output starts at the first emitted address. Use `org` in the source
   to set program addresses.
+- `--start EXPR`, `--org EXPR`: set the initial assembly PC before reading
+  source. This is useful for fixed-placement legacy modules that do not carry
+  their own `org`.
 - `--obj`, `--object`: write a native `GCO1` object instead of flat bytes.
 - `--define NAME=EXPR`: define or override a symbol before assembly.
 - `--case-sensitive`: make symbols case-sensitive. The default is
   case-insensitive, matching common HDK-era Game.com source.
+- `--sdk-compat`, `--asm8521-compat`: enable official SDK/ASM8521 dialect
+  compatibility such as bare no-colon label lines, trailing descriptive text
+  after `equ` values, and the SDK's left-to-right expression evaluation. This
+  is intentionally opt-in.
 
 Assembly syntax highlights:
 
@@ -57,6 +64,8 @@ Assembly syntax highlights:
   forces 16-bit absolute/word forms for ambiguous operands.
 - Square brackets are accepted as memory parentheses, so `[rr4]` and `(rr4)`
   assemble the same way.
+- Official SDK register aliases from `SM85.TYP` are provided, including
+  lowercase forms under `--case-sensitive`.
 
 Object mode notes:
 
@@ -90,7 +99,7 @@ fixups, can import the official syscall-style HDK `.obj` shape, and can place
 fixed binary assets.
 
 ```bash
-build/gamecom-link INPUT... -o OUTPUT [--base ADDR] [--map MAP] [--incbin PATH@ADDR]
+build/gamecom-link INPUT... -o OUTPUT [--base ADDR] [--map MAP] [--incbin PATH@ADDR] [--symbols-only OBJ]
 ```
 
 Options:
@@ -102,6 +111,9 @@ Options:
 - `--map MAP`: write linked chunks, symbols, and fixup locations.
 - `--incbin PATH@ADDR`: place a raw binary asset at an absolute address after
   object placement. This is useful for speech/audio blobs or other fixed banks.
+- `--symbols-only OBJ`: import an object's exported symbols without placing its
+  bytes. This is useful for banked legacy projects where each bank window is
+  linked separately but cross-bank calls still need address resolution.
 
 Linking model:
 
@@ -202,7 +214,7 @@ from binary graphics banks. New projects should usually prefer
 ports and byte comparisons against HDK layouts.
 
 ```bash
-build/gamecom-pack-hdk INPUT -o OUTPUT [--hdk-data PATH] [--gfx-dir DIR] [--size N] [--program-offset N] [--fill BYTE]
+build/gamecom-pack-hdk INPUT -o OUTPUT [--hdk-data PATH] [--gfx-dir DIR] [--incbin PATH@OFFSET] [--size N] [--program-offset N] [--fill BYTE]
 ```
 
 Options:
@@ -211,8 +223,11 @@ Options:
 - `--hdk-data PATH`: optional old HDK filler/template data. Use only when a
   byte comparison to an old HDK output requires it.
 - `--gfx-dir DIR`: directory containing `bankNN.BIN` files.
+- `--incbin PATH@OFFSET`: overlay an additional binary at an image-relative
+  offset. Repeat this option for SDK-style projects that place separate code
+  or data ranges at fixed ROM offsets.
 - `--size N`: force output size. If omitted, the tool chooses 1 MiB or 2 MiB
-  depending on program/template size.
+  depending on program/template/`--incbin` size.
 - `--program-offset N`: offset where assembled program bytes are overlaid.
   Default: `0x40000`.
 - `--fill BYTE`: fill byte for unused space. Default: `0xff`.
@@ -222,6 +237,8 @@ Graphics placement:
 - `bankNN.BIN` files are detected by decimal digits in the filename.
 - Each bank is copied to `NN * 0x4000`.
 - At most `0x4000` bytes from each bank file are copied.
+- `--incbin` overlays are applied after the main program/template and graphics
+  bank copies, so explicit placements can intentionally replace earlier bytes.
 
 Example:
 
@@ -230,6 +247,16 @@ build/gamecom-pack-hdk tetris.raw \
   --gfx-dir examples/tetris/assembler/source/gfx \
   --fill 0xff \
   -o build/tetris_packed.bin
+```
+
+SDK-style fixed placement example:
+
+```bash
+build/gamecom-pack-hdk bank20.raw -o build/game_packed.bin \
+  --program-offset 0x40000 \
+  --incbin bank23.raw@0x46000 \
+  --incbin bank25.raw@0x4a000 \
+  --gfx-dir build/art_banks
 ```
 
 ## Examples

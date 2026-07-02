@@ -54,6 +54,7 @@ struct symbols {
 
 struct fixup {
 	uint16_t address;
+	int addend;
 	char *name;
 	char *source;
 };
@@ -344,13 +345,14 @@ static int symbol_get(struct symbols *symbols, const char *name, uint16_t *value
 	return 0;
 }
 
-static void fixup_add(struct fixups *fixups, uint16_t address, const char *name, const char *source)
+static void fixup_add(struct fixups *fixups, uint16_t address, const char *name, int addend, const char *source)
 {
 	if (fixups->size == fixups->cap) {
 		fixups->cap = fixups->cap ? fixups->cap * 2 : 64;
 		fixups->items = xrealloc(fixups->items, fixups->cap * sizeof(fixups->items[0]));
 	}
 	fixups->items[fixups->size].address = address;
+	fixups->items[fixups->size].addend = addend;
 	fixups->items[fixups->size].name = canon_name(name);
 	fixups->items[fixups->size].source = xstrdup(source);
 	fixups->size++;
@@ -376,7 +378,7 @@ static int is_native_object(const struct file_data *file)
 	return file->size >= 10 && memcmp(file->data, "GCO1", 4) == 0;
 }
 
-static void load_native_object(const char *path, const struct file_data *file, struct chunks *chunks, struct symbols *symbols, struct fixups *fixups)
+static void load_native_object(const char *path, const struct file_data *file, struct chunks *chunks, struct symbols *symbols, struct fixups *fixups, int symbols_only)
 {
 	size_t pos = 4;
 	uint16_t base;
@@ -392,7 +394,8 @@ static void load_native_object(const char *path, const struct file_data *file, s
 	pos += 4;
 	if (pos + image_size > file->size)
 		die("%s image is truncated", path);
-	chunk_add(chunks, base, file->data + pos, image_size, path);
+	if (!symbols_only)
+		chunk_add(chunks, base, file->data + pos, image_size, path);
 	pos += image_size;
 	if (pos + 2 > file->size)
 		die("%s export table is truncated", path);
@@ -415,18 +418,26 @@ static void load_native_object(const char *path, const struct file_data *file, s
 	for (i = 0; i < fixup_count; i++) {
 		uint32_t offset;
 		uint8_t type;
+		int addend = 0;
 		char *name;
 		if (pos + 5 > file->size)
 			die("%s fixup is truncated", path);
 		offset = rd32(file->data + pos);
 		pos += 4;
 		type = file->data[pos++];
+		if (type == 2) {
+			if (pos + 2 > file->size)
+				die("%s fixup addend is truncated", path);
+			addend = (int16_t)rd16(file->data + pos);
+			pos += 2;
+		}
 		name = read_name(file->data, file->size, &pos);
-		if (type != 1)
+		if (type != 1 && type != 2)
 			die("%s has unsupported fixup type %u", path, type);
 		if (offset + 1 >= image_size)
 			die("%s has a fixup outside its image", path);
-		fixup_add(fixups, (uint16_t)(base + offset), name, path);
+		if (!symbols_only)
+			fixup_add(fixups, (uint16_t)(base + offset), name, addend, path);
 		free(name);
 	}
 	if (pos != file->size)
@@ -529,6 +540,7 @@ static void resolve_fixups(struct chunks *chunks, struct symbols *symbols, struc
 			die("%s fixup at %04x is outside a linked chunk", fixup->source, fixup->address);
 		if (!symbol_get(symbols, fixup->name, &value))
 			die("%s has unresolved symbol %s", fixup->source, fixup->name);
+		value = (uint16_t)(value + fixup->addend);
 		offset = fixup->address - chunk->address;
 		chunk->data[offset] = (uint8_t)(value >> 8);
 		chunk->data[offset + 1] = (uint8_t)value;
@@ -552,7 +564,7 @@ static void write_map(const char *path, struct chunks *chunks, struct symbols *s
 		fprintf(fp, "%04x %s\n", symbols->items[i].value, symbols->items[i].name);
 	fprintf(fp, "\nfixups\n");
 	for (i = 0; i < fixups->size; i++)
-		fprintf(fp, "%04x %s %s\n", fixups->items[i].address, fixups->items[i].name, fixups->items[i].source);
+		fprintf(fp, "%04x %+d %s %s\n", fixups->items[i].address, fixups->items[i].addend, fixups->items[i].name, fixups->items[i].source);
 	fclose(fp);
 }
 
@@ -586,7 +598,7 @@ static void write_linked_image(const char *path, struct chunks *chunks, int have
 
 static void usage(void)
 {
-	fprintf(stderr, "usage: gamecom-link INPUT... -o OUTPUT [--base ADDR] [--map MAP] [--incbin PATH@ADDR]\n");
+	fprintf(stderr, "usage: gamecom-link INPUT... -o OUTPUT [--base ADDR] [--map MAP] [--incbin PATH@ADDR] [--symbols-only OBJ]\n");
 	exit(1);
 }
 
@@ -594,6 +606,7 @@ int main(int argc, char **argv)
 {
 	struct input_list inputs = { 0 };
 	struct input_list legacy_inputs = { 0 };
+	struct input_list symbol_inputs = { 0 };
 	struct incbin_list incbins = { 0 };
 	struct chunks chunks = { 0 };
 	struct symbols symbols = { 0 };
@@ -621,6 +634,10 @@ int main(int argc, char **argv)
 			if (++i >= argc)
 				usage();
 			incbin_push(&incbins, argv[i]);
+		} else if (strcmp(argv[i], "--symbols-only") == 0) {
+			if (++i >= argc)
+				usage();
+			input_push(&symbol_inputs, argv[i]);
 		} else if (argv[i][0] == '-') {
 			usage();
 		} else {
@@ -632,10 +649,17 @@ int main(int argc, char **argv)
 	for (i = 0; i < (int)inputs.size; i++) {
 		struct file_data file = read_file(inputs.items[i]);
 		if (is_native_object(&file)) {
-			load_native_object(inputs.items[i], &file, &chunks, &symbols, &fixups);
+			load_native_object(inputs.items[i], &file, &chunks, &symbols, &fixups, 0);
 		} else {
 			input_push(&legacy_inputs, inputs.items[i]);
 		}
+		free(file.data);
+	}
+	for (i = 0; i < (int)symbol_inputs.size; i++) {
+		struct file_data file = read_file(symbol_inputs.items[i]);
+		if (!is_native_object(&file))
+			die("%s is not a native object", symbol_inputs.items[i]);
+		load_native_object(symbol_inputs.items[i], &file, &chunks, &symbols, &fixups, 1);
 		free(file.data);
 	}
 	for (i = 0; i < (int)legacy_inputs.size; i++) {
