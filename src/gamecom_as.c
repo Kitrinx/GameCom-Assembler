@@ -916,6 +916,10 @@ static int parse_unary(struct expr *ex)
 		ex->pos++;
 		return ~parse_unary(ex);
 	}
+	if (!strncasecmp(ex->text + ex->pos, ".not.", 5)) {
+		ex->pos += 5;
+		return parse_unary(ex) ? 0 : 1;
+	}
 	return parse_primary(ex);
 }
 
@@ -1568,8 +1572,10 @@ static struct memref parse_indirect_imm_ref(struct assembler *as, const char *te
 	char *t = trim_copy_range(text, strlen(text));
 	out.width = 8;
 	if (t[0] == '@') {
-		int reg = indirect_byte_reg(t + 1);
+		int reg = op_reg(t + 1);
 		int value;
+		if (reg < 0)
+			reg = indirect_byte_reg(t + 1);
 		if (reg >= 0) {
 			out.valid = 1;
 			out.mode = 0;
@@ -1969,8 +1975,17 @@ static int encode_bit_modify(struct assembler *as, struct bytes *out, const char
 {
 	struct bitmem bm;
 	int bit;
+	int reg;
 	if (!ops[0] || !ops[1])
 		return 0;
+	reg = parse_at_reg(ops[0]);
+	if (reg >= 0) {
+		bit = bit_index(as, ops[1], pc);
+		bytes_emit(out, str_eq_lit(mnemonic, "bclr") ? 0x1c : 0x1d);
+		bytes_emit(out, (reg << 3) | bit);
+		bytes_emit(out, 0x00);
+		return 1;
+	}
 	bm = parse_bit_mem(as, ops[0], pc);
 	bit = bit_index(as, ops[1], pc);
 	if (bm.valid) {
@@ -1988,8 +2003,18 @@ static int encode_bit_branch(struct assembler *as, struct bytes *out, const char
 {
 	struct bitmem bm;
 	int bit;
+	int reg;
 	if (!ops[0] || !ops[1] || !ops[2])
 		return 0;
+	reg = parse_at_reg(ops[0]);
+	if (reg >= 0) {
+		bit = bit_index(as, ops[1], pc);
+		bytes_emit(out, str_eq_lit(mnemonic, "bbc") ? 0x2a : 0x2b);
+		bytes_emit(out, (reg << 3) | bit);
+		bytes_emit(out, 0x00);
+		bytes_emit(out, rel8(as, ops[2], pc, 4));
+		return 1;
+	}
 	bm = parse_bit_mem(as, ops[0], pc);
 	bit = bit_index(as, ops[1], pc);
 	if (bm.valid) {
@@ -2491,10 +2516,17 @@ static int eval_equ_expr(struct assembler *as, const char *text, int pc)
 
 static void assembler_pass(struct assembler *as, int resolve)
 {
+	struct cond_state {
+		int parent_active;
+		int condition_true;
+	};
 	uint16_t code_pc = as->have_initial_pc ? as->initial_pc : 0;
 	uint16_t data_pc = 0;
 	int section_code = 1;
 	int stopped = 0;
+	int active = 1;
+	struct cond_state cond_stack[64];
+	int cond_depth = 0;
 	size_t i;
 	as->resolve_pass = resolve;
 	for (i = 0; i < as->lines.size; i++) {
@@ -2502,34 +2534,74 @@ static void assembler_pass(struct assembler *as, int resolve)
 		struct bytes tmp = { 0 };
 		uint16_t pc = section_code ? code_pc : data_pc;
 		int line_is_equ = line_is_equ_directive(line);
-		line->address = pc;
-		line->span = 0;
-		bytes_clear(&line->out);
-		if (stopped)
-			continue;
-		if (line->label && !line_is_equ)
-			symbol_set(as, line->label, pc);
-		if (!line->op)
-			continue;
+			line->address = pc;
+			line->span = 0;
+			bytes_clear(&line->out);
+			if (stopped)
+				continue;
+			if (line->op && str_eq_lit(line->op, "if")) {
+				int ok = 0;
+				int condition = 0;
+				if (cond_depth >= (int)(sizeof(cond_stack) / sizeof(cond_stack[0]))) {
+					set_error(as, "conditional nesting is too deep");
+					return;
+				}
+				if (line->operand_count > 0 && active) {
+					condition = eval_expr(as, line->operands[0], pc, &ok) != 0;
+					if (!ok) {
+						char context[sizeof(as->error)];
+						snprintf(context, sizeof(context), "%s:%d: %s", line->path, line->line_no, as->error);
+						snprintf(as->error, sizeof(as->error), "%s", context);
+						return;
+					}
+				}
+				cond_stack[cond_depth].parent_active = active;
+				cond_stack[cond_depth].condition_true = condition;
+				cond_depth++;
+				active = active && condition;
+				continue;
+			}
+			if (line->op && str_eq_lit(line->op, "else")) {
+				if (cond_depth <= 0) {
+					set_error(as, "else without if");
+					return;
+				}
+				active = cond_stack[cond_depth - 1].parent_active && !cond_stack[cond_depth - 1].condition_true;
+				continue;
+			}
+			if (line->op && str_eq_lit(line->op, "endif")) {
+				if (cond_depth <= 0) {
+					set_error(as, "endif without if");
+					return;
+				}
+				active = cond_stack[cond_depth - 1].parent_active;
+				cond_depth--;
+				continue;
+			}
+			if (!active)
+				continue;
+			if (line->label && !line_is_equ)
+				symbol_set(as, line->label, pc);
+			if (!line->op)
+				continue;
 		if (str_eq_lit(line->op, "end")) {
 			if (!as->root_path || strcmp(line->path, as->root_path) == 0)
 				stopped = 1;
 			continue;
 		}
-		if (str_eq_lit(line->op, "data")) {
-			section_code = 0;
-			continue;
-		}
-		if (str_eq_lit(line->op, "program")) {
+			if (str_eq_lit(line->op, "data")) {
+				section_code = 0;
+				continue;
+			}
+			if (str_eq_lit(line->op, "program")) {
 			section_code = 1;
 			continue;
 		}
-		if (str_eq_lit(line->op, "title") || str_eq_lit(line->op, "type") || str_eq_lit(line->op, "list") ||
-			str_eq_lit(line->op, "nlist") || str_eq_lit(line->op, "global") || str_eq_lit(line->op, "public") ||
-			str_eq_lit(line->op, "extrn") || str_eq_lit(line->op, "extern") || str_eq_lit(line->op, "eject") ||
-			str_eq_lit(line->op, "page") || str_eq_lit(line->op, "if") || str_eq_lit(line->op, "else") ||
-			str_eq_lit(line->op, "endif") || str_eq_lit(line->op, "error"))
-			continue;
+			if (str_eq_lit(line->op, "title") || str_eq_lit(line->op, "type") || str_eq_lit(line->op, "list") ||
+				str_eq_lit(line->op, "nlist") || str_eq_lit(line->op, "global") || str_eq_lit(line->op, "public") ||
+				str_eq_lit(line->op, "extrn") || str_eq_lit(line->op, "extern") || str_eq_lit(line->op, "eject") ||
+				str_eq_lit(line->op, "page") || str_eq_lit(line->op, "error"))
+				continue;
 		if (str_eq_lit(line->op, "org") || str_eq_lit(line->op, ".org") || str_eq_lit(line->op, "base") || str_eq_lit(line->op, ".base")) {
 			int ok = 0;
 			uint16_t new_pc = (uint16_t)eval_expr(as, line->operands[0], pc, &ok);
