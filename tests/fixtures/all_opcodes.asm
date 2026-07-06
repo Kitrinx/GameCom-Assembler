@@ -46,6 +46,8 @@ start:
 	pop @r2
 	bclr #34h(r2),#3
 	bset #34h(r2),#3
+	bclr @r4,#2
+	bset @r4,#3
 	pushw rr12h
 	popw rr12h
 	cmp r3,@r4
@@ -60,6 +62,8 @@ start:
 	mov @r4,r3
 	bbc ff34h,#3,$+4
 	bbs ff34h,#3,$+4
+	bbc @r4,#1,$+4
+	bbs @r4,#2,$+4
 	exts r12h
 	dm #12h
 	mov ps0,#12h
@@ -108,6 +112,8 @@ start:
 	invalid 59h
 	cmp (rr4),#12h
 	mov (rr4),#12h
+	cmp @r4,#12h
+	mov @r4,#12h
 	div rr4,rr6
 	div rr34h,#12h
 	movm r34h,#0fh,r12h

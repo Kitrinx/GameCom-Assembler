@@ -923,6 +923,16 @@ static int parse_unary(struct expr *ex)
 	return parse_primary(ex);
 }
 
+static int expr_match_ci(struct expr *ex, const char *text)
+{
+	size_t len = strlen(text);
+	if (!strncasecmp(ex->text + ex->pos, text, len)) {
+		ex->pos += len;
+		return 1;
+	}
+	return 0;
+}
+
 static int parse_expr_ltr(struct expr *ex)
 {
 	int value = parse_unary(ex);
@@ -973,6 +983,24 @@ static int parse_expr_ltr(struct expr *ex)
 		} else if (ex->text[ex->pos] == '|') {
 			ex->pos++;
 			value |= parse_unary(ex);
+		} else if (expr_match_ci(ex, ".ge.") || expr_match_ci(ex, ">=")) {
+			rhs = parse_unary(ex);
+			value = value >= rhs;
+		} else if (expr_match_ci(ex, ".gt.") || expr_match_ci(ex, ">")) {
+			rhs = parse_unary(ex);
+			value = value > rhs;
+		} else if (expr_match_ci(ex, ".le.") || expr_match_ci(ex, "<=")) {
+			rhs = parse_unary(ex);
+			value = value <= rhs;
+		} else if (expr_match_ci(ex, ".ne.") || expr_match_ci(ex, "!=") || expr_match_ci(ex, "<>")) {
+			rhs = parse_unary(ex);
+			value = value != rhs;
+		} else if (expr_match_ci(ex, ".lt.") || expr_match_ci(ex, "<")) {
+			rhs = parse_unary(ex);
+			value = value < rhs;
+		} else if (expr_match_ci(ex, ".eq.") || expr_match_ci(ex, "==")) {
+			rhs = parse_unary(ex);
+			value = value == rhs;
 		} else {
 			break;
 		}

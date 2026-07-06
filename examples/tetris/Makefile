@@ -24,7 +24,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(RAW): $(ASM_SOURCES) tools | $(BUILD_DIR)
-	cd $(ASM_DIR) && ../../../build/gamecom-as source/MAIN.ASM -o build/tetris.raw --lst build/tetris.lst
+	cd $(ASM_DIR) && ../../../build/gamecom-as source/MAIN.ASM -o build/tetris.raw --lst build/tetris.lst --sdk-compat --case-sensitive
 
 $(PACKED): $(RAW) $(GFX_BANKS) tools
 	cd $(ASM_DIR) && ../../../build/gamecom-pack-hdk build/tetris.raw -o build/tetris_packed.bin --gfx-dir source/gfx --size 0x100000 --fill 0xff

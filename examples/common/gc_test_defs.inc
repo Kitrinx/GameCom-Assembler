@@ -1,0 +1,83 @@
+; Shared constants for Game.com hardware test ROM examples.
+
+ENTRY_ADDR	equ 4020h
+
+IE0		equ 10h
+IE1		equ 11h
+IR0		equ 12h
+IR1		equ 13h
+P0		equ 14h
+P1		equ 15h
+P2		equ 16h
+P3		equ 17h
+SYS		equ 19h
+CKC		equ 1ah
+PS0		equ 1eh
+PS1		equ 1fh
+P0C		equ 20h
+P1C		equ 21h
+P2C		equ 22h
+P3C		equ 23h
+MMU0		equ 24h
+MMU1		equ 25h
+MMU2		equ 26h
+MMU3		equ 27h
+MMU4		equ 28h
+URTT		equ 2bh
+URTR		equ 2ch
+URTS		equ 2dh
+URTC		equ 2eh
+LCC		equ 30h
+LCH		equ 31h
+LCV		equ 32h
+DMC		equ 34h
+DMX1		equ 35h
+DMY1		equ 36h
+DMDX		equ 37h
+DMDY		equ 38h
+DMX2		equ 39h
+DMY2		equ 3ah
+DMPL		equ 3bh
+DMBR		equ 3ch
+DMVP		equ 3dh
+SGC		equ 40h
+SG0L		equ 42h
+SG1L		equ 44h
+SG0TH		equ 46h
+SG0TL		equ 47h
+SG1TH		equ 48h
+SG1TL		equ 49h
+SG2L		equ 4ah
+SG2TH		equ 4ch
+SG2TL		equ 4dh
+SGDA		equ 4eh
+TM0C		equ 50h
+TM0D		equ 51h
+TM1C		equ 52h
+TM1D		equ 53h
+CLKT		equ 54h
+
+BIOS_TIMER_BANK	equ 0a6h
+
+VRAM_A		equ 0a000h
+VRAM_A_END	equ 0bf3fh
+VRAM_B		equ 0c000h
+VRAM_B_END	equ 0df3fh
+
+Line0		equ 0a050h
+Line1		equ 0a053h
+Line2		equ 0a056h
+Line3		equ 0a059h
+Line4		equ 0a05ch
+Line5		equ 0a05fh
+Line6		equ 0a062h
+Line7		equ 0a065h
+Line8		equ 0a068h
+Line9		equ 0a06bh
+Line10		equ 0a06eh
+Line11		equ 0a071h
+Line12		equ 0a074h
+
+CommonHexSave	equ 0d0h
+CommonDrawCount	equ 0d1h
+CommonFillByte	equ 0d2h

@@ -12,7 +12,10 @@ EXAMPLE_DIRS := \
 	examples/hello_world \
 	examples/sound_tests_asm \
 	examples/cycle_count_test \
-	examples/tetris
+	examples/tetris \
+	examples/timer_irq_boundary_test \
+	examples/dma_lcdc_visual_test \
+	examples/sfr_latch_hole_test
 
 .PHONY: all tools bins test coverage examples verify-examples clean clean-examples
 
