@@ -15,7 +15,8 @@ EXAMPLE_DIRS := \
 	examples/tetris \
 	examples/timer_irq_boundary_test \
 	examples/dma_lcdc_visual_test \
-	examples/sfr_latch_hole_test
+	examples/sfr_latch_hole_test \
+	examples/edge_grid_test
 
 .PHONY: all tools bins test coverage examples verify-examples clean clean-examples
 

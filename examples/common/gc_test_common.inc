@@ -57,11 +57,13 @@ FillVramB:
 	ret
 
 FillVramRange:
+	call BeginDirectVramWrite
 	mov r0,CommonFillByte
 FillVramRangeLoop:
 	mov (rr2)+,r0
 	cmpw rr2,rr4
 	br ule,FillVramRangeLoop
+	call EndDirectVramWrite
 	ret
 
 DrawString:
@@ -74,6 +76,7 @@ DrawStringDone:
 	ret
 
 DrawChar:
+	call BeginDirectVramWrite
 	sub r0,#20h
 	movw rr6,#FontTable
 DrawCharSeek:
@@ -96,6 +99,19 @@ DrawCharColumn:
 	mov @rr2,r1
 	mov 1(rr2),r1
 	addw rr2,#40
+	call EndDirectVramWrite
+	ret
+
+; Direct CPU VRAM writes are only valid during VBlank or with LCD transfer
+; disabled. Preserve the complete LCC value so page and gradation tests keep
+; their selected state after each write interval.
+BeginDirectVramWrite:
+	mov CommonSavedLcc,LCC
+	bclr LCC,#7
+	ret
+
+EndDirectVramWrite:
+	mov LCC,CommonSavedLcc
 	ret
 
 DrawSpace:

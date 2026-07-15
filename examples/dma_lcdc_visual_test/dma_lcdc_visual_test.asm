@@ -238,6 +238,7 @@ RenderGeometryPage:
 	ret
 
 DrawDmaSourceA:
+	call BeginDirectVramWrite
 	movw rr2,#VRAM_A
 	mov r7,#16
 DrawDmaSourceRows:
@@ -252,9 +253,11 @@ DrawDmaSourceRows:
 	addw rr2,#36
 	dec r7
 	br nz,DrawDmaSourceRows
+	call EndDirectVramWrite
 	ret
 
 DrawCompoundSourceA:
+	call BeginDirectVramWrite
 	movw rr2,#VRAM_A
 	mov r7,#16
 DrawCompoundRows:
@@ -269,9 +272,11 @@ DrawCompoundRows:
 	addw rr2,#36
 	dec r7
 	br nz,DrawCompoundRows
+	call EndDirectVramWrite
 	ret
 
 FillCompoundDestA:
+	call BeginDirectVramWrite
 	movw rr2,#0a010h
 	mov r7,#16
 FillCompoundRows0:
@@ -296,9 +301,11 @@ FillCompoundCols1:
 	addw rr2,#32
 	dec r7
 	br nz,FillCompoundRows1
+	call EndDirectVramWrite
 	ret
 
 DrawOverlapSourceA:
+	call BeginDirectVramWrite
 	movw rr2,#0a780h
 	mov r7,#18
 DrawOverlapRows:
@@ -313,9 +320,11 @@ DrawOverlapRows:
 	addw rr2,#36
 	dec r7
 	br nz,DrawOverlapRows
+	call EndDirectVramWrite
 	ret
 
 DrawLcdcRamp:
+	call BeginDirectVramWrite
 	movw rr2,#0a240h
 	mov r7,#70
 DrawRampLoop:
@@ -329,6 +338,7 @@ DrawRampLoop:
 	mov (rr2)+,r0
 	dec r7
 	br nz,DrawRampLoop
+	call EndDirectVramWrite
 	movw rr2,#Line3
 	movw rr4,#StrRamp1
 	call DrawString

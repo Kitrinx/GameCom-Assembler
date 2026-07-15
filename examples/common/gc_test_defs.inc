@@ -81,3 +81,4 @@ Line12		equ 0a074h
 CommonHexSave	equ 0d0h
 CommonDrawCount	equ 0d1h
 CommonFillByte	equ 0d2h
+CommonSavedLcc	equ 0d3h

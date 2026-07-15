@@ -2,23 +2,56 @@
 
 This third ASM example builds a cartridge-side SM8521 timing probe.
 
-It calibrates Timer0 overhead, runs all 256 primary opcode bytes through a
-tiny internal-RAM stub harness, stores the measured tick deltas in internal
+It iterates over all 256 primary opcode bytes with ROM-resident executable
+payloads, stores measured cycle counts or explicit skip markers in internal
 RAM, and renders a 32-page report on the LCD. Each page covers one eight-byte
 opcode range such as `OP 00-07` or `OP F8-FF`.
 
-Normal executable rows show the calibrated 128-iteration delta byte. Long
-operators such as `MULT` and `DIV D,#` use a one-iteration baseline to avoid
-8-bit Timer0 wrap. Unsafe/non-local primary opcodes such as `HALT`, `STOP`,
-`DM`, `MOV PS0`, `CALS`, `IRET`, stack-only probes, invalid/reserved opcodes,
-and the currently unsafe register-pair `DIV` probe are shown as `--`.
+Each executable row uses an immediately paired baseline and opcode run. Both
+runs restart Timer0 and begin from the same prepared register, flag, pointer,
+interrupt, and sandbox-memory state. Three trials are taken; a two-of-three
+match is displayed as the hexadecimal cycle count, while a row without a
+majority is displayed as `??`. This replaces the previous 128-repeat modulo
+fingerprint, whose raw `82`/`83` values were not human-readable cycle counts.
 
-The displayed values are cartridge-observable Timer0 tick deltas for the
-current core/test environment. They are useful for comparing primary-opcode
-timing changes, but they should not be treated as final silicon cycle truth
-until the timer cadence audit is fully closed. Descriptor sub-opcode spaces are
-covered by canonical safe descriptor forms, not by every possible descriptor
-byte.
+Executable test bytes are never copied to or fetched from internal RAM. A
+real-hardware capture of the earlier version reset at progress opcode `00`,
+exactly when its first measurement called a generated baseline `RET` at RAM
+address `0310h`. This localizes the failure to the generated-RAM trampoline but
+does not prove that internal RAM is non-executable. The BIOS normally clears,
+reads, and writes this region as work RAM, and the datasheet does not explicitly
+forbid instruction fetches from it. Every runnable descriptor now contains its
+opcode plus an inline `RET` in cartridge ROM, eliminating both self-modifying
+code and collisions with BIOS work data. Baseline and opcode paths both use the
+same indirect-call form so dispatch overhead still cancels.
+
+`RET` is calibrated through a controlled private-stack trampoline. The measured
+RET cost is removed from the two CALL rows, so those rows display CALL itself
+rather than CALL plus its target RET. Unsafe/non-returning primary opcodes such
+as `HALT`, `STOP`, `DM`, `MOV PS0`, `CALS`, `IRET`, unbalanced stack probes,
+board-connected `MOV P0-P3,#imm`, and invalid/reserved opcodes are shown as
+`--`.
+
+Opcodes `CC-CF` cannot be executed safely by a general cartridge timing ROM.
+They write fixed immediates to the physical P0-P3 data latches; P3 bits 7:6
+select the active cartridge slot. The previous `CF MOV P3,#FFh` probe selected
+neither slot and disconnected the ROM containing its next instruction. There
+is also no one immediate that preserves both slot 1 and slot 2. These four rows
+therefore remain present as intentional skips instead of reporting a guessed
+or inferred measurement. `C8-CB` remain measured with zero because IE0, IE1,
+IR0, and IR1 are already cleared by the interrupt-disabled harness.
+
+The hardware setup explicitly stops and clears the watchdog, selects register
+bank zero, installs a private 16-bit stack, disables interrupts and DMA, and
+requires `CKC[5:3]=100` so the CPU and Timer0 both use main clock divided by
+two. A mismatched clock displays `CLOCK IS NOT FCK/2` instead of producing
+scaled results. During measurement, the current opcode is shown on screen to
+localize any remaining hardware-only failure.
+
+The values are cartridge-observable SM8521 Timer0 counts. They are intended for
+real-hardware characterization, but each row still represents one documented
+safe canonical operand form rather than every possible descriptor byte or both
+paths of every conditional encoding.
 
 Build from the package root:
 
@@ -40,18 +73,8 @@ without starting the measurement harness, and only the BIOS execute command
 launches the test. It advertises no icon bank, so the BIOS uses the text
 fallback on the cartridge menu.
 
-Optional local live-sim smoke example, when this folder sits next to
-`GameCom_MiSTer`:
-
-```bash
-../GameCom_MiSTer/agents/tools/live_verilator_sdl_sim/build/gamecom_live \
-  --bios "../GameCom_MiSTer/reference/ROMs/Game.com External BIOS (1997) (71-516) [!].bin" \
-  --cart examples/cycle_count_test/build/gamecom_cycle_count_test.tgc \
-  --no-window --fast --auto-power --stop-disable --max-cycles 220000000 \
-  --dump-frame examples/cycle_count_test/build/cycle_count_page0.ppm \
-  --debug-summary
-```
-
-Press any main button to advance pages. In the simulator, use repeated
-`--script-press START,LEN,a` windows after the first page is drawn to verify
-pagination.
+The generated `.tgc` may be loaded on Game.com hardware or in a compatible
+emulator. Simulator executables and copyrighted BIOS images are intentionally
+not external build dependencies. Use
+`make -C examples/cycle_count_test verify` for the self-contained package
+verification. Press any main button to advance report pages at runtime.

@@ -39,7 +39,8 @@ EntryReturn:
 
 GameMain:
 	di
-	mov lcc,#0b0h
+	; Keep LCD transfer disabled for the complete direct-VRAM render.
+	mov lcc,#30h
 	mov lch,#07h
 	mov lcv,#27h
 	call ClearVramA
@@ -47,6 +48,7 @@ GameMain:
 	movw rr4,#HelloMessage
 	call DrawGlyphMessage
 	call DrawTestChrSwatch
+	mov lcc,#0b0h
 Forever:
 	br Forever
 

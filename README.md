@@ -273,10 +273,20 @@ The examples are:
 - `examples/sound_tests_asm`
 - `examples/cycle_count_test`
 - `examples/tetris`
+- `examples/timer_irq_boundary_test`
+- `examples/dma_lcdc_visual_test`
+- `examples/sfr_latch_hole_test`
+- `examples/edge_grid_test`
 
 Each example emits `.raw`, `.lst`, and signed 1 MiB `.tgc` files under its
 local build directory. Tetris also emits an intermediate packed image because
 it has separate binary graphics banks.
+
+The assembly renderers disable LCD transfer by clearing `LCC.7` around every
+direct CPU VRAM write interval, then restore the complete prior `LCC` value.
+This follows the SM8521 restriction against direct VRAM writes while LCD
+transfer is active outside VBlank. Tetris draws through the official BIOS DMA
+entry points and does not directly store to VRAM.
 
 The example cartridges use normal BIOS-menu entry behavior. Init/reset/close
 commands return to the BIOS, and the program starts only when the BIOS issues

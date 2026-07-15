@@ -10,15 +10,18 @@ ClearRamLoop:
 	ret
 
 ClearVram:
+	call BeginDirectVramWrite
 	movw rr2,#0a000h
 	clr r0
 ClearVramLoop:
 	mov (rr2)+,r0
 	cmpw rr2,#0bf3fh
 	br ule,ClearVramLoop
+	call EndDirectVramWrite
 	ret
 
 RenderSpans:
+	call BeginDirectVramWrite
 RenderRecordLoop:
 	mov r1,(rr4)+
 	cmp r1,#0
@@ -32,6 +35,16 @@ RenderCopyLoop:
 	br nz,RenderCopyLoop
 	br RenderRecordLoop
 RenderDone:
+	call EndDirectVramWrite
+	ret
+
+BeginDirectVramWrite:
+	mov SoundSavedLcc,LCC
+	bclr LCC,#7
+	ret
+
+EndDirectVramWrite:
+	mov LCC,SoundSavedLcc
 	ret
 
 Copy16ToSfr:

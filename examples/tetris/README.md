@@ -64,17 +64,7 @@ intentional byte difference in `Wait10Seconds`: `br nz,waitloop` branches back
 to the local loop label instead of being captured by the later `waitLoop`
 input-scan label.
 
-Local live-sim smoke used while preparing this example:
-
-```bash
-../GameCom_MiSTer/agents/tools/live_verilator_sdl_sim/build/gamecom_live \
-  --bios "../GameCom_MiSTer/reference/ROMs/Game.com External BIOS (1997) (71-516) [!].bin" \
-  --cart examples/tetris/assembler/build/tetris.tgc \
-  --no-window --fast --auto-power --stop-disable \
-  --script-touch 250000000,150000000,2,2 --max-cycles 560000000 \
-  --dump-frame examples/tetris/assembler/build/tetris_waitfix_560m.ppm \
-  --debug-summary
-```
-
-That smoke runs past the old all-black stall point, keeps timer waits alive,
-shows continued DMA/VRAM activity, and captures a nonblack game frame.
+The generated `.tgc` may be loaded on Game.com hardware or in a compatible
+emulator. Simulator executables and copyrighted BIOS images are intentionally
+not external build dependencies. Use `make -C examples/tetris verify` for the
+self-contained package verification.

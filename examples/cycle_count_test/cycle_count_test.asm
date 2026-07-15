@@ -10,6 +10,13 @@ IR1		equ 13h
 P0		equ 14h
 P1		equ 15h
 P2		equ 16h
+P3		equ 17h
+SYS		equ 19h
+CKC		equ 1ah
+SPH		equ 1ch
+SPL		equ 1dh
+PS0		equ 1eh
+PS1		equ 1fh
 P0C		equ 20h
 P1C		equ 21h
 P2C		equ 22h
@@ -19,11 +26,13 @@ MMU4		equ 28h
 LCC		equ 30h
 LCH		equ 31h
 LCV		equ 32h
+DMC		equ 34h
 TM0C		equ 50h
 TM0D		equ 51h
+WDTC		equ 5fh
 
-Base16		equ 80h
-Base1		equ 81h
+TrialBaseline	equ 80h
+TrialFirst	equ 81h
 ResultPtr	equ 82h
 DescPtr		equ 84h
 OpcodeFlags	equ 86h
@@ -31,7 +40,9 @@ OpcodeLen	equ 87h
 OpcodeByte	equ 88h
 PageBase	equ 89h
 RowOpcode	equ 8ah
+TrialSecond	equ 8bh
 RowLinePtr	equ 8ch
+ClockStatus	equ 8dh
 RowResultPtr	equ 8eh
 Results		equ 90h
 ResNop		equ Results+0
@@ -109,15 +120,19 @@ ResTimer	equ Results+71
 
 CurrentPage	equ 0d8h
 HexSave		equ 0d9h
+SavedLcc	equ 0dah
+RetDelta	equ 0dbh
+RetCaptured	equ 0dch
+RetMode		equ 0ddh
+OpcodeTarget	equ 0deh
 T0		equ 0e0h
 T1		equ 0e1h
 W0		equ 0e2h
 W1		equ 0e4h
+BaselineTarget	equ 0e6h
 MemByte		equ 0e8h
 DrawCount	equ 0e9h
 LoopCounter	equ 0eah
-CopyCounter	equ 0ebh
-SeekCounter	equ 0ech
 
 Line0		equ 0a050h
 Line1		equ 0a053h
@@ -139,8 +154,6 @@ Result7	equ 0ae75h
 Result8	equ 0ae78h
 Result9	equ 0ae7bh
 ResultTable	equ 0200h
-Stub		equ 0300h
-StubRet		equ 0308h
 
 	db 08h
 	db 20h
@@ -172,10 +185,17 @@ EntryReturn:
 
 Main:
 	di
+	; Do not inherit watchdog, register-bank, or stack state from the BIOS.
+	mov WDTC,#00h
+	mov PS0,#00h
+	bset SYS,#6
+	mov SPH,#03h
+	mov SPL,#0f0h
 	mov IE0,#00h
 	mov IE1,#00h
 	mov IR0,#00h
 	mov IR1,#00h
+	mov DMC,#00h
 	mov MMU2,#20h
 	mov MMU3,#21h
 	mov MMU4,#22h
@@ -186,6 +206,19 @@ Main:
 	movw rr2,#Line1
 	movw rr4,#StrRunning
 	call DrawString
+	movw rr2,#Line2
+	movw rr4,#StrProgress
+	call DrawString
+	call ValidateClock
+	cmp ClockStatus,#00h
+	br eq,ClockValid
+	movw rr2,#Line3
+	movw rr4,#StrClockError
+	call DrawString
+ClockErrorLoop:
+	br ClockErrorLoop
+ClockValid:
+	call CalibrateRetDelta
 	call RunTests
 	clr CurrentPage
 	call RenderCurrentPage
@@ -204,21 +237,125 @@ RunTests:
 	movw ResultPtr,#ResultTable
 	movw DescPtr,#OpcodeDescriptors
 	clr OpcodeByte
-	call InstallBaselineStub
-	call MeasureBaseline16
-	call MeasureBaseline1
+	movw BaselineTarget,#BaselineStub
 RunOpcodeLoop:
+	call DrawProgress
 	call MeasureOpcode
 	inc OpcodeByte
 	br nz,RunOpcodeLoop
+	call FinalizeControlResults
+	ret
+ValidateClock:
+	clr ClockStatus
+	mov r0,CKC
+	and r0,#38h
+	cmp r0,#20h
+	br eq,ValidateClockDone
+	mov ClockStatus,#01h
+ValidateClockDone:
 	ret
 
-InstallBaselineStub:
-	movw rr6,#Stub
-	mov r0,#0f8h
-	mov @rr6,r0
-	movw rr6,#StubRet
-	mov @rr6,r0
+DrawProgress:
+	movw rr2,#Result2
+	mov r0,OpcodeByte
+	call DrawHexByte
+	ret
+
+CalibrateRetDelta:
+	call MeasureRetDeltaTrial
+	mov TrialFirst,r0
+	call MeasureRetDeltaTrial
+	mov TrialSecond,r0
+	cmp r0,TrialFirst
+	br eq,CalibrateRetStableFirst
+	call MeasureRetDeltaTrial
+	cmp r0,TrialFirst
+	br eq,CalibrateRetStableFirst
+	cmp r0,TrialSecond
+	br eq,CalibrateRetStableThird
+	mov RetDelta,#0feh
+	ret
+CalibrateRetStableFirst:
+	mov RetDelta,TrialFirst
+	ret
+CalibrateRetStableThird:
+	mov RetDelta,TrialSecond
+	ret
+
+MeasureRetDeltaTrial:
+	call MeasureRetBaselinePath
+	mov TrialBaseline,r0
+	call MeasureRetTestPath
+	sub r0,TrialBaseline
+	ret
+
+MeasureRetBaselinePath:
+	mov RetMode,#00h
+	movw rr0,#RetCapture
+	pushw rr0
+	call StartTimer
+	jmp RetBaselineStub
+
+MeasureRetTestPath:
+	mov RetMode,#01h
+	movw rr0,#RetCapture
+	pushw rr0
+	call StartTimer
+	jmp RetTestStub
+
+RetBaselineStub:
+	jmp RetCapture
+
+RetTestStub:
+	ret
+
+RetCapture:
+	mov r0,TM0D
+	mov RetCaptured,r0
+	cmp RetMode,#00h
+	br nz,RetCaptureStackReady
+	popw rr0
+RetCaptureStackReady:
+	mov r0,RetCaptured
+	ret
+
+FinalizeControlResults:
+	cmp RetDelta,#0feh
+	br nz,FinalizeRetStable
+	mov r0,#0feh
+	br FinalizeStoreRet
+FinalizeRetStable:
+	movw rr2,#ResultTable+098h
+	mov r0,@rr2
+	cmp r0,#0feh
+	br eq,FinalizeRetUnstable
+	cmp r0,#0ffh
+	br eq,FinalizeRetUnstable
+	add r0,RetDelta
+	br FinalizeStoreRet
+FinalizeRetUnstable:
+	mov r0,#0feh
+FinalizeStoreRet:
+	mov RetCaptured,r0
+	movw rr2,#ResultTable+0f8h
+	mov @rr2,r0
+	cmp r0,#0feh
+	br eq,FinalizeCallsUnstable
+	movw rr2,#ResultTable+03fh
+	mov r1,@rr2
+	sub r1,r0
+	mov @rr2,r1
+	movw rr2,#ResultTable+049h
+	mov r1,@rr2
+	sub r1,r0
+	mov @rr2,r1
+	ret
+FinalizeCallsUnstable:
+	mov r0,#0feh
+	movw rr2,#ResultTable+03fh
+	mov @rr2,r0
+	movw rr2,#ResultTable+049h
+	mov @rr2,r0
 	ret
 
 StartTimer:
@@ -228,33 +365,9 @@ StartTimer:
 	mov TM0C,#80h
 	ret
 
-MeasureBaseline16:
-	call StartTimer
-	mov LoopCounter,#80h
-Base16Loop:
-	call Stub
-	dec LoopCounter
-	br nz,Base16Loop
-	mov r0,TM0D
-	mov Base16,r0
-	ret
-
-MeasureBaseline1:
-	call StartTimer
-	call Stub
-	mov r0,TM0D
-	mov Base1,r0
-	ret
-
 StoreAvg16:
-	sub r0,Base16
-	movw rr2,ResultPtr
-	mov (rr2)+,r0
-	movw ResultPtr,rr2
-	ret
-
 StoreDelta1:
-	sub r0,Base1
+StoreResult:
 	movw rr2,ResultPtr
 	mov (rr2)+,r0
 	movw ResultPtr,rr2
@@ -273,62 +386,51 @@ MeasureOpcode:
 	mov OpcodeFlags,r0
 	mov r0,(rr4)+
 	mov OpcodeLen,r0
-	movw rr6,#Stub
-	mov CopyCounter,#6
-CopyOpcodeStub:
-	mov r0,(rr4)+
-	mov (rr6)+,r0
-	dec CopyCounter
-	br nz,CopyOpcodeStub
+	movw OpcodeTarget,rr4
+	addw rr4,#0006h
 	movw DescPtr,rr4
 	cmp OpcodeLen,#00h
 	br nz,OpcodeRunnable
 	call StoreSkip
 	ret
 OpcodeRunnable:
-	call AppendStubReturns
+	call MeasureOpcodeTrial
+	mov TrialFirst,r0
+	call MeasureOpcodeTrial
+	mov TrialSecond,r0
+	cmp r0,TrialFirst
+	br eq,MeasureOpcodeStableFirst
+	call MeasureOpcodeTrial
+	cmp r0,TrialFirst
+	br eq,MeasureOpcodeStableFirst
+	cmp r0,TrialSecond
+	br eq,MeasureOpcodeStableThird
+	mov r0,#0feh
+	br MeasureOpcodeStore
+MeasureOpcodeStableFirst:
+	mov r0,TrialFirst
+	br MeasureOpcodeStore
+MeasureOpcodeStableThird:
+	mov r0,TrialSecond
+MeasureOpcodeStore:
+	call StoreResult
+	ret
+
+MeasureOpcodeTrial:
 	call PrepareOpcodeState
-	mov r0,OpcodeFlags
-	and r0,#80h
-	br nz,MeasureOpcodeLong
 	call StartTimer
-	mov LoopCounter,#80h
-MeasureOpcodeLoop:
-	call Stub
-	dec LoopCounter
-	br nz,MeasureOpcodeLoop
+	call @BaselineTarget
+	mov r0,TM0D
+	mov TrialBaseline,r0
+	call PrepareOpcodeState
+	call StartTimer
+	call @OpcodeTarget
 	mov r0,TM0D
 	di
 	mov IE0,#00h
 	mov IE1,#00h
-	call StoreAvg16
+	sub r0,TrialBaseline
 	ret
-MeasureOpcodeLong:
-	call StartTimer
-	call Stub
-	mov r0,TM0D
-	di
-	mov IE0,#00h
-	mov IE1,#00h
-	call StoreDelta1
-	ret
-
-AppendStubReturns:
-	movw rr6,#Stub
-	mov r1,OpcodeLen
-AppendStubSeek:
-	cmp r1,#00h
-	br eq,AppendStubWrite
-	incw rr6
-	dec r1
-	br AppendStubSeek
-AppendStubWrite:
-	mov r0,#0f8h
-	mov @rr6,r0
-	movw rr6,#StubRet
-	mov @rr6,r0
-	ret
-
 PrepareOpcodeState:
 	mov T0,#55h
 	mov T1,#33h
@@ -336,9 +438,9 @@ PrepareOpcodeState:
 	mov DrawCount,#0a5h
 	movw W0,#1234h
 	movw W1,#0003h
-	mov r0,#00h
+	mov r0,#0e0h
 	mov r1,#05h
-	mov r2,#00h
+	mov r2,#0e0h
 	mov r3,#00h
 	mov r4,#00h
 	mov r5,#00h
@@ -346,7 +448,6 @@ PrepareOpcodeState:
 	mov r7,#00h
 	movw rr4,#1234h
 	movw rr6,#MemByte
-	cmp T0,T0
 	mov r0,OpcodeFlags
 	and r0,#01h
 	br z,PrepNoR4Byte
@@ -360,7 +461,7 @@ PrepNoRr4Mem:
 	mov r0,OpcodeFlags
 	and r0,#04h
 	br z,PrepNoRr4Target
-	movw rr4,#StubRet
+	movw rr4,#StaticStubRet
 PrepNoRr4Target:
 	mov r0,OpcodeFlags
 	and r0,#08h
@@ -373,6 +474,9 @@ PrepNoRr6Mem:
 	movw rr4,#1234h
 	movw rr6,#0003h
 PrepNoDivPair:
+	; Use one deterministic condition state and restore the sandbox pointer.
+	mov PS1,#00h
+	mov r0,#0e0h
 	ret
 
 TestNop:
@@ -1187,12 +1291,14 @@ TestTimerLoop:
 	ret
 
 ClearVram:
+	call BeginDirectVramWrite
 	movw rr2,#0a000h
 	clr r0
 ClearVramLoop:
 	mov (rr2)+,r0
 	cmpw rr2,#0bf3fh
 	br ule,ClearVramLoop
+	call EndDirectVramWrite
 	ret
 
 DrawString:
@@ -1205,6 +1311,7 @@ DrawStringDone:
 	ret
 
 DrawChar:
+	call BeginDirectVramWrite
 	sub r0,#20h
 	movw rr6,#FontTable
 DrawCharSeek:
@@ -1227,6 +1334,16 @@ DrawCharColumn:
 	mov @rr2,r1
 	mov 1(rr2),r1
 	addw rr2,#40
+	call EndDirectVramWrite
+	ret
+
+BeginDirectVramWrite:
+	mov SavedLcc,LCC
+	bclr LCC,#7
+	ret
+
+EndDirectVramWrite:
+	mov LCC,SavedLcc
 	ret
 
 DrawHexNibble:
@@ -1255,8 +1372,14 @@ DrawHexByte:
 DrawResultByte:
 	mov HexSave,r0
 	cmp r0,#0ffh
-	br nz,DrawResultHex
+	br nz,DrawResultCheckUnstable
 	movw rr4,#StrSkip
+	call DrawString
+	ret
+DrawResultCheckUnstable:
+	cmp r0,#0feh
+	br nz,DrawResultHex
+	movw rr4,#StrUnstable
 	call DrawString
 	ret
 DrawResultHex:
@@ -1454,12 +1577,22 @@ WaitPageSeen:
 
 StrRunning:	dm 'RUNNING CYCLE TEST'
 	db 0
-StrTitle:	dm 'SM8521 OPCODE TICKS'
+StrProgress:	dm 'OPCODE'
+	db 0
+StrClockError:	dm 'CLOCK IS NOT FCK/2'
+	db 0
+StrTitle:	dm 'SM8521 OPCODE CYCLES'
 	db 0
 StrOpRange:	dm 'OP '
 	db 0
 StrSkip:	dm '--'
 	db 0
+StrUnstable:	dm '??'
+	db 0
+
+BaselineStub:
+StaticStubRet:
+	ret
 
 	include "opcode_tables.inc"
 
